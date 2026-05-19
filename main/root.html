@@ -216,7 +216,7 @@ progress {
 		<table class="show" id="show"></table>
 		<p>
 			<button data-lang="B00" onclick="savecfg()"></button>
-			<button data-lang="B01" onclick="resetcfg()"></button>
+			<button data-lang="B01" onpointerdown="resetcfg()" onpointerup="resetcfg(true)" onpointerleave="resetcfg(true)" onpointercancel="resetcfg(true)"></button>
 			<span class="result" id="result1"></span>
 		</p>
 		<hr>
@@ -309,8 +309,8 @@ const params = {
 	throt_rev: ['100%', '75%', '50%', '25%'],
 	throt_ztc: false,
 	throt_cal: false,
-	input_mode: ['I08', 'I09', 'I10', 'iBUS', 'SBUS', 'CRSF'],
-	telem_mode: ['KISS', 'KISS auto', 'iBUS', 'S.Port', 'CRSF'],
+	input_mode: ['I08', 'I09', 'I10', 'iBUS', 'SBUS', 'CRSF', 'EXBUS', 'HoTT'],
+	telem_mode: ['KISS', 'KISS auto', 'iBUS', 'S.Port', 'CRSF', 'MSB', 'HoTT'],
 	prot_sens: ['I11', 'I12', 'I13'],
 	music: '',
 	bec: ['5.5V', '6.5V', '7.4V', '8.4V', '12V'],
@@ -323,11 +323,10 @@ const deps = [
 		brushed: ['timing', 'sine_range', 'sine_power', 'freq_min', 'duty_spup', 'duty_ramp', 'duty_lock', 'throt_ztc', 'prot_stall'],
 	},
 	{ // Enable if checked
-		damp: ['sine_range', 'sine_power', 'duty_lock'],
 	},
 ];
 
-let strs, ws, bn, bi, ival, timer, target, throtval, delayed, blocked, tabnum, tabvis = {};
+let strs, ws, bn, bi, rt, ival, timer, target, throtval, delayed, blocked, tabnum, tabvis = {};
 
 async function fetchlang(lang) {
 	const data = await fetch(`?${lang}`);
@@ -639,8 +638,14 @@ function savecfg() {
 	send('save\n');
 }
 
-function resetcfg() {
-	send('reset\n');
+function resetcfg(cancel) {
+	if (rt) {
+		clearTimeout(rt);
+		bn = 8;
+	}
+	if (cancel) return;
+	rt = setTimeout(() => {rt = null, send('reset\n')}, 2000);
+	setresult(1, null, 'S29', 5);
 }
 
 function parsemusic() {

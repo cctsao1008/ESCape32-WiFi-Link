@@ -49,5 +49,5 @@ To make a combined image, run:
 
 ```
 cd build
-esptool.py --chip esp32s2 merge_bin -o ESCape32-WiFi-Link-ESP32-S2.bin @flash_args
+esptool -c esp32s2 merge-bin -o ESCape32-WiFi-Link-ESP32-S2.bin @flash_args
 ```
