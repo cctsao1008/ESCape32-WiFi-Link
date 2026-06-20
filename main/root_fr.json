@@ -89,6 +89,8 @@
 	"telem_mode": "(mode de télémétrie)",
 	"telem_phid": "(numero ID télémétrie)",
 	"telem_poles": "(nombre de pôles moteur)",
+	"telem_volt": "(calibration du capteur de tension)",
+	"telem_curr": "(calibration du capteur de courant)",
 	"prot_stall": "(ERPM protection décrochage moteur)",
 	"prot_temp": "(protection température maxi)",
 	"prot_sens": "(capteur de température)",

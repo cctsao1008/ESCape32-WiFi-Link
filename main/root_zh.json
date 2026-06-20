@@ -89,6 +89,8 @@
 	"telem_mode": "(遥测模式)",
 	"telem_phid": "(遥测物理ID)",
 	"telem_poles": "(电机极数)",
+	"telem_volt": "(电压传感器校准)",
+	"telem_curr": "(电流传感器校准)",
 	"prot_stall": "(ERPM堵转保护)",
 	"prot_temp": "(温度保护值)",
 	"prot_sens": "(温度传感器)",

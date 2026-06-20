@@ -89,6 +89,8 @@
 	"telem_mode": "(telemetry mode)",
 	"telem_phid": "(telemetry physical ID)",
 	"telem_poles": "(number of motor poles)",
+	"telem_volt": "(voltage sensor calibration)",
+	"telem_curr": "(current sensor calibration)",
 	"prot_stall": "(stall protection ERPM)",
 	"prot_temp": "(temperature threshold)",
 	"prot_sens": "(temperature sensor)",

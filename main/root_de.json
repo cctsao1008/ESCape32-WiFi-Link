@@ -89,6 +89,8 @@
 	"telem_mode": "(telemetrie modus)",
 	"telem_phid": "(telemetrie physikalische ID)",
 	"telem_poles": "(motorpolzahl)",
+	"telem_volt": "(spannungssensorkalibrierung)",
+	"telem_curr": "(stromsensorkalibrierung)",
 	"prot_stall": "(motorstillstand sicherung ERPM)",
 	"prot_temp": "(temperaturschutz grenzwert)",
 	"prot_sens": "(temperatursensor)",
