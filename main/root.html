@@ -454,7 +454,7 @@ function getfield(key, val) {
 		case 'boolean':
 			return `<input type="checkbox" id="field_${key}"${val != 0 ? ' checked' : ''} onchange="setparam('${key}', checked ? '1' : '0')">`;
 		case 'string':
-			return `<input type="text" maxlength="200" id="field_${key}" value="${val}" class="str" onchange="setparam('${key}', value)">`;
+			return `<input type="text" maxlength="255" id="field_${key}" value="${val}" class="str" onchange="setparam('${key}', value)">`;
 		case 'object':
 			const res = [];
 			res.push(`<select id="field_${key}" onchange="setparam('${key}', value)">`);

@@ -216,7 +216,7 @@ LANG_LIST(XX)
 }
 
 static esp_err_t wshandler(httpd_req_t *req) {
-	static int size, boot, wrp, ofs;
+	static int size, boot, wrp, ofs, idx;
 	if (req->method == HTTP_GET) return 0;
 	httpd_ws_frame_t frame = {0};
 	if (httpd_ws_recv_frame(req, &frame, 0)) return -1;
@@ -262,6 +262,7 @@ static esp_err_t wshandler(httpd_req_t *req) {
 				wrp = strtol(arg, &arg, 0);
 				if (*arg != '\n') goto done;
 				ofs = 0;
+				idx = 0;
 				res = 0;
 				goto done;
 			}
@@ -303,14 +304,38 @@ static esp_err_t wshandler(httpd_req_t *req) {
 				}
 				if ((res = recvval())) goto error; // Wait for ACK after reboot
 			} else {
-				for (int pos = 0; pos < len; pos += 1024, ofs += 1024) {
-					notify(req, "_status", ofs * 100 / size);
+				static uint8_t sig[2048];
+				int pos = 0;
+				int cnt = (size + 1023) >> 10;
+				if (cnt > 2 && !ofs) { // Erase signature first
+					static const uint8_t dummy[] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+					for (int num = 0; num < 2; ++num) {
+						sendval(CMD_WRITE);
+						sendval(num);
+						senddata(dummy, sizeof dummy);
+						if ((res = recvval())) goto error;
+					}
+					memcpy(sig, buf, 2048);
+					pos = 2048;
+					ofs = 2048;
+				}
+				for (; pos < len; pos += 1024, ofs += 1024, ++idx) {
+					notify(req, "_status", idx * 100 / cnt);
 					sendval(CMD_WRITE);
-					sendval(ofs / 1024); // Block number
+					sendval(ofs >> 10);
 					senddata(buf + pos, min(len - pos, 1024));
 					if ((res = recvval())) goto error;
 				}
 				if (ofs < size) goto skip; // More frames on the way
+				if (cnt > 2) { // Write signature last
+					for (pos = 0; pos < 2048; pos += 1024, ++idx) {
+						notify(req, "_status", idx * 100 / cnt);
+						sendval(CMD_WRITE);
+						sendval(pos >> 10);
+						senddata(sig + pos, 1024);
+						if ((res = recvval())) goto error;
+					}
+				}
 			}
 			if (wrp) {
 				sendval(CMD_SETWRP);
