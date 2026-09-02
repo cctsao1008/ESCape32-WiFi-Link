@@ -28,4 +28,17 @@ menu "ESCape32-WiFi-Link configuration"
 		bool "LED active low"
 		default y if IDF_TARGET_ESP32C3
 		default n
+	config USB_BRIDGE
+		bool "USB Serial/JTAG transparent ESC bridge"
+		depends on IDF_TARGET_ESP32C3
+		default y
+		help
+			Keep the original WiFi/WebSocket functions and additionally bridge
+			raw bytes between the ESP32-C3 native USB Serial/JTAG port and the
+			existing ESC UART. The ESCape32 protocol is not parsed or modified.
+	config USB_BRIDGE_IDLE_MS
+		int "USB bridge ownership idle timeout (ms)"
+		depends on USB_BRIDGE
+		range 250 10000
+		default 1500
 endmenu

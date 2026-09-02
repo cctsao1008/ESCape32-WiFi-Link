@@ -25,6 +25,7 @@
 #include "lwip/sockets.h"
 #include "mdns.h"
 #include "build_defs.h"
+#include "usb_bridge.h"
 
 #define SSID "ESCape32-WiFi-Link"
 #define HOSTNAME "escape32"
@@ -62,6 +63,14 @@ LANG_LIST(XX)
 
 static httpd_handle_t server;
 static QueueHandle_t queue;
+static bool wifi_update_active;
+static int wifi_update_fd = -1;
+
+static void wifi_update_release(void) {
+	wifi_update_active = false;
+	wifi_update_fd = -1;
+	esc_owner_release(ESC_OWNER_WIFI);
+}
 
 static inline int min(int a, int b) {
 	return a < b ? a : b;
@@ -222,20 +231,36 @@ static esp_err_t wshandler(httpd_req_t *req) {
 	if (httpd_ws_recv_frame(req, &frame, 0)) return -1;
 	int len = frame.len;
 	int res = -1;
+	bool wifi_owned = false;
+	bool keep_wifi = false;
 	switch (frame.type) {
 		case HTTPD_WS_TYPE_TEXT: { // CLI passthrough
 			uint8_t buf[1200];
 			frame.payload = buf;
 			if (httpd_ws_recv_frame(req, &frame, sizeof buf)) return -1;
 			char *arg;
+
+			/* Do not interleave normal WebSocket traffic with an update lease. */
+			if (wifi_update_active) goto done;
+
 			if ((arg = checkcmd(buf, len, "_probe"))) {
 				if (*arg != '\n') goto done;
+				if (!esc_owner_try_acquire(ESC_OWNER_WIFI, 0)) {
+					res = -1004;
+					goto done;
+				}
+				wifi_owned = true;
 				sendval(CMD_PROBE);
 				res = recvval();
 				goto done;
 			}
 			if ((arg = checkcmd(buf, len, "_info"))) {
 				if (*arg != '\n') goto done;
+				if (!esc_owner_try_acquire(ESC_OWNER_WIFI, 0)) {
+					res = -1004;
+					goto done;
+				}
+				wifi_owned = true;
 				uint8_t info[52];
 				sendval(CMD_INFO);
 				if (recvdata(info) != 32) goto done;
@@ -251,6 +276,11 @@ static esp_err_t wshandler(httpd_req_t *req) {
 			if ((arg = checkcmd(buf, len, "_setwrp"))) {
 				int val = strtol(arg, &arg, 0);
 				if (*arg != '\n') goto done;
+				if (!esc_owner_try_acquire(ESC_OWNER_WIFI, 0)) {
+					res = -1004;
+					goto done;
+				}
+				wifi_owned = true;
 				sendval(CMD_SETWRP);
 				sendval(val);
 				res = recvval();
@@ -261,23 +291,46 @@ static esp_err_t wshandler(httpd_req_t *req) {
 				boot = strtol(arg, &arg, 0);
 				wrp = strtol(arg, &arg, 0);
 				if (*arg != '\n') goto done;
+				if (!esc_owner_try_acquire(ESC_OWNER_WIFI, 0)) {
+					res = -1004;
+					goto done;
+				}
+				wifi_owned = true;
+				keep_wifi = true;
+				wifi_update_active = true;
+				wifi_update_fd = httpd_req_to_sockfd(req);
 				ofs = 0;
 				idx = 0;
 				res = 0;
 				goto done;
 			}
+			if (!esc_owner_try_acquire(ESC_OWNER_WIFI, 0)) {
+				res = -1004;
+				goto done;
+			}
+			wifi_owned = true;
 			sendbuf(buf, len);
-			if (checkcmd(buf, len, "play")) return 0; // Don't wait for response
+			if (checkcmd(buf, len, "play")) {
+				esc_owner_release(ESC_OWNER_WIFI);
+				return 0; // Don't wait for response
+			}
 			int pos = recvbuf(buf + len, sizeof buf - len, 0);
+			esc_owner_release(ESC_OWNER_WIFI);
+			wifi_owned = false;
 			if (!pos) return -1;
 			frame.len += pos;
 			return httpd_ws_send_frame(req, &frame);
 		done:
+			if (wifi_owned && !keep_wifi) esc_owner_release(ESC_OWNER_WIFI);
 			len += sprintf((char *)buf + len, res ? "ERROR\n" : "OK\n");
 			frame.len = len;
 			return httpd_ws_send_frame(req, &frame);
 		}
 		case HTTPD_WS_TYPE_BINARY: { // Firmware update
+			if (!wifi_update_active || wifi_update_fd != httpd_req_to_sockfd(req) || esc_owner_get() != ESC_OWNER_WIFI) {
+				notify(req, "_result", -1004); // ESC UART busy / no active update lease
+				return 0;
+			}
 			ESP_LOGI("httpd_ws", "Updating... [size %d, boot %d, wrp 0x%02x, ofs %d, len %d]", size, boot, wrp, ofs, len);
 			uint8_t *buf = 0;
 			if (ofs + len > size || (boot && len > 4096) || !(len = (len + 3) & ~3)) { // Invalid frame
@@ -344,6 +397,7 @@ static esp_err_t wshandler(httpd_req_t *req) {
 			}
 			notify(req, "_status", 100);
 		error:
+			wifi_update_release();
 			notify(req, "_result", res);
 		skip:
 			free(buf);
@@ -371,7 +425,9 @@ static void connhandler(void *arg, esp_event_base_t base, int32_t id, void *data
 }
 
 static void disconnhandler(void *arg, esp_event_base_t base, int32_t id, void *data) {
-	ESP_LOGI("httpd", "Socket %d disconnected", *(int *)data);
+	int fd = *(int *)data;
+	if (wifi_update_active && wifi_update_fd == fd) wifi_update_release();
+	ESP_LOGI("httpd", "Socket %d disconnected", fd);
 }
 
 void app_main(void) {
@@ -417,6 +473,8 @@ void app_main(void) {
 	ESP_ERROR_CHECK(uart_param_config(CONFIG_UART_NUM, &ucfg));
 	ESP_ERROR_CHECK(uart_set_pin(CONFIG_UART_NUM, CONFIG_UART_TX, CONFIG_UART_RX, -1, -1));
 	ESP_ERROR_CHECK(uart_set_mode(CONFIG_UART_NUM, UART_MODE_RS485_HALF_DUPLEX));
+
+	usb_bridge_start();
 
 	httpd_config_t hcfg = HTTPD_DEFAULT_CONFIG();
 	hcfg.max_open_sockets = CONFIG_LWIP_MAX_SOCKETS - 3;

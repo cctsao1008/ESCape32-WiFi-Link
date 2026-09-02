@@ -1,0 +1,6 @@
+# E61 enhanced WiFi-Link: reserve the native USB Serial/JTAG byte stream for
+# the transparent ESC bridge. Application/bootloader logs must not share it.
+CONFIG_ESP_CONSOLE_NONE=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+CONFIG_LOG_DEFAULT_LEVEL_NONE=y
+CONFIG_BOOTLOADER_LOG_LEVEL_NONE=y

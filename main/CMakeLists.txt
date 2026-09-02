@@ -1,4 +1,23 @@
-idf_component_register(SRCS main.c PRIV_REQUIRES espressif__mdns)
+set(component_priv_requires
+	espressif__mdns
+	nvs_flash
+	esp_netif
+	esp_event
+	esp_wifi
+	esp_http_server
+	esp_driver_gpio
+	esp_driver_uart
+	lwip
+)
+
+if(IDF_TARGET STREQUAL "esp32c3")
+	list(APPEND component_priv_requires esp_driver_usb_serial_jtag)
+endif()
+
+idf_component_register(
+	SRCS main.c usb_bridge.c
+	PRIV_REQUIRES ${component_priv_requires}
+)
 set(lang_map en:EN fr:FR de:DE ru:РУ zh:中)
 string(REGEX REPLACE "([a-z][a-z]):([^;]+)" "XX(\\1)" LANG_LIST "${lang_map}")
 string(REGEX REPLACE "([a-z][a-z]):([^;]+)" "<option value=\"\\1\">\\2</option>" LANG_OPTS "${lang_map}")
