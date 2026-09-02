@@ -162,7 +162,6 @@ void usb_bridge_start(void) {
 	usb_serial_jtag_driver_config_t cfg = {
 		.tx_buffer_size = USB_DRIVER_BUF_SIZE,
 		.rx_buffer_size = USB_DRIVER_BUF_SIZE,
-		.intr_priority = 0,
 	};
 
 	ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&cfg));
