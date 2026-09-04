@@ -3,51 +3,89 @@ ESCape32 Wi-Fi Link
 
 ESP32-based embedded configurator for [ESCape32](https://github.com/neoxic/ESCape32) electronic speed controllers.
 
+USB-only branch
+---------------
 
-Installation
-------------
+The `usb-only` branch repurposes the ESP32-C3 WiFi-Link hardware as a transparent
+USB Serial/JTAG <-> ESC serial bridge. Wi-Fi, HTTP, WebSocket, mDNS, DNS, and the
+embedded Web UI are not initialized or built in this branch.
 
-Download the latest pre-built combined image [here](https://github.com/neoxic/ESCape32-WiFi-Link/releases).
+Data path:
 
-Flash the image at offset 0x0 using [ESP Flash Tool](https://www.espressif.com/en/support/download/other-tools) or [Adafruit WebSerial ESPTool](https://adafruit.github.io/Adafruit_WebSerial_ESPTool).
+```
+Host PC
+  <-> ESP32-C3 native USB Serial/JTAG
+  <-> UART1, 38400 baud, 8N1
+  <-> ESCape32 single-wire interface
+```
 
-Visit the [ESCape32 Wiki / Wi-Fi Link](https://github.com/neoxic/ESCape32/wiki/WiFiLink) page for more information.
+ESP32-C3 defaults:
 
-
-Pinouts
--------
-
-|    MCU   | RX | TX | LED |
-|----------|---:|---:|----:|
-| ESP32-C3 |  4 |  2 |  *8 |
-| ESP32-S2 | 16 | 33 |  15 |
+| Signal | GPIO |
+|--------|-----:|
+| RX     |    4 |
+| TX     |    2 |
+| LED    |   *8 |
 
 (*) active low
 
-_Note:_ The above GPIO pin numbers can be changed using the `idf.py menuconfig` command.
-
-
-Building from source
---------------------
-
-Install the ESP-IDF environment as described [here](https://idf.espressif.com).
-
-To build for the ESP32-S2, run:
+A general-purpose host programmer is included under:
 
 ```
-idf.py set-target esp32s2
+tools/escape32-programmer/
+```
+
+It supports bootloader probe/info, application firmware programming and
+read-back verification, bootloader update, and write-protection control.
+
+Building the USB-only firmware
+------------------------------
+
+Install ESP-IDF v5.5, then run:
+
+```
+idf.py set-target esp32c3
 idf.py build
 ```
 
-To install on the device, run:
+To flash the ESP32-C3 bridge:
 
 ```
-idf.py flash
+idf.py -p <PORT> flash
 ```
 
-To make a combined image, run:
+ESCape32 Programmer
+-------------------
 
+Install the Python dependency:
+
+```powershell
+cd tools\escape32-programmer
+py -m pip install -r requirements.txt
 ```
-cd build
-esptool -c esp32s2 merge-bin -o ESCape32-WiFi-Link-ESP32-S2.bin @flash_args
+
+List serial ports:
+
+```powershell
+py .\escape32_programmer.py --list-ports
 ```
+
+Read bootloader / firmware information:
+
+```powershell
+py .\escape32_programmer.py --port COM7 info
+```
+
+Program an ESCape32 application image:
+
+```powershell
+py .\escape32_programmer.py --port COM7 flash .\ESCape32-target.bin
+```
+
+See `tools/escape32-programmer/README.md` for the complete CLI.
+
+Upstream Wi-Fi Link
+-------------------
+
+The original Wi-Fi Link implementation and releases are maintained by
+[neoxic/ESCape32-WiFi-Link](https://github.com/neoxic/ESCape32-WiFi-Link).
