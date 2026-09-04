@@ -1,4 +1,3 @@
 dependencies:
-  espressif/mdns: "*"
   idf:
-    version: ">=4.1.0"
+    version: ">=5.5.0"
