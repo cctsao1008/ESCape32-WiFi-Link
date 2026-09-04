@@ -46,11 +46,14 @@ static void uart_write_all(const uint8_t *buf, int len)
 	}
 
 	/*
-	 * Keep the request/response boundary deterministic on the single-wire
-	 * ESC link.  In RS485 half-duplex mode the driver releases TX after the
-	 * final bit has left the UART.
+	 * Do not call uart_wait_tx_done() here.  The USB RX task must return to
+	 * usb_serial_jtag_read_bytes() immediately so the native USB peripheral
+	 * keeps being drained.  Otherwise a stalled TX-done wait can propagate
+	 * back-pressure to Windows and make the next serial write time out.
+	 *
+	 * UART_MODE_RS485_HALF_DUPLEX already handles the transmitter release
+	 * when the UART reaches TX-done, as in the original WiFi-Link transport.
 	 */
-	ESP_ERROR_CHECK(uart_wait_tx_done(CONFIG_UART_NUM, portMAX_DELAY));
 }
 
 static void usb_write_all(const uint8_t *buf, int len)
