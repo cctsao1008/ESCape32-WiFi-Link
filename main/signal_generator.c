@@ -107,7 +107,10 @@ static uint16_t dshot_make_frame(uint16_t value, bool telemetry)
 
 static void dshot_build_symbols(uint16_t speed, uint16_t value, bool telemetry)
 {
-    uint32_t bit_ticks = (DSHOT_RMT_RESOLUTION_HZ + speed / 2U) / speed;
+    /* speed is expressed as DShot150/300/600, i.e. in kbit/s. */
+    uint32_t bit_rate_hz = (uint32_t)speed * 1000U;
+    uint32_t bit_ticks =
+        (DSHOT_RMT_RESOLUTION_HZ + bit_rate_hz / 2U) / bit_rate_hz;
     uint32_t high_one = (bit_ticks * 3U + 2U) / 4U;
     uint32_t high_zero = (bit_ticks * 3U + 4U) / 8U;
     uint16_t frame = dshot_make_frame(value, telemetry);
