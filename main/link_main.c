@@ -26,6 +26,11 @@
 #define SIGNAL_STATUS_PWM    1
 #define SIGNAL_STATUS_DSHOT  2
 
+#define LINK_LED_TICK_MS       125
+#define LINK_LED_TASK_STACK    2048
+#define LINK_LED_TASK_PRIORITY 5
+#define LINK_LED_ACTIVITY_TICKS 2
+
 typedef struct __attribute__((__packed__)) {
     uint16_t freq_hz;
     uint16_t pulse_us;
@@ -58,6 +63,48 @@ typedef struct {
     size_t len;
     size_t expected;
 } LinkAdapterParser;
+
+static volatile uint8_t link_led_activity_ticks;
+
+static void link_led_note_activity(void)
+{
+    link_led_activity_ticks = LINK_LED_ACTIVITY_TICKS;
+}
+
+static void link_led_task(void *arg)
+{
+    (void)arg;
+    uint32_t phase = 0;
+
+    for (;;) {
+        signal_generator_status_t sig;
+        signal_generator_get_status(&sig);
+
+        bool on = false;
+        if (wifi_configured != wifi_active) {
+            /* Reboot/config transition: double blink every 2 seconds. */
+            uint32_t p = phase % 16U;
+            on = p == 0U || p == 2U;
+        } else if (sig.mode == SIGNAL_MODE_PWM) {
+            /* PWM generator: 2 Hz, 50% duty. */
+            on = (phase % 4U) < 2U;
+        } else if (sig.mode == SIGNAL_MODE_DSHOT) {
+            /* DShot generator: 4 Hz, 50% duty. */
+            on = (phase % 2U) == 0U;
+        } else if (link_led_activity_ticks > 0) {
+            /* UART/USB activity: visible ~250 ms pulse. */
+            on = true;
+            --link_led_activity_ticks;
+        } else if (wifi_active) {
+            /* Wi-Fi active and otherwise idle: short heartbeat every 2 seconds. */
+            on = (phase % 16U) == 0U;
+        }
+
+        setled(on ? 1 : 0);
+        ++phase;
+        vTaskDelay(pdMS_TO_TICKS(LINK_LED_TICK_MS));
+    }
+}
 
 static void link_fill_signal_info(SignalInfoPayload *payload, uint8_t status)
 {
@@ -244,6 +291,7 @@ static bool link_is_signal_command(uint8_t command)
 static void link_forward_raw(const uint8_t *buf, int len)
 {
     if (!signal_generator_uart_mode()) return;
+    link_led_note_activity();
     usb_forward_raw(buf, len);
 }
 
@@ -401,9 +449,8 @@ static void link_uart_to_usb_task(void *arg)
 
         if (n <= 0) continue;
         link_owner_touch(LINK_OWNER_USB);
-        setled(1);
+        link_led_note_activity();
         usb_write_all(buf, n);
-        setled(0);
     }
 }
 
@@ -494,5 +541,16 @@ void app_main(void)
     ESP_ERROR_CHECK(res == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
 
     if (wifi_configured) start_wifi_services();
+
+    /* Boot indication ends here; the status task owns the LED from now on. */
     setled(0);
+    res = xTaskCreate(
+        link_led_task,
+        "link-led",
+        LINK_LED_TASK_STACK,
+        NULL,
+        LINK_LED_TASK_PRIORITY,
+        NULL
+    );
+    ESP_ERROR_CHECK(res == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
 }
