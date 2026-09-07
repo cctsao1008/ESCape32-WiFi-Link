@@ -16,7 +16,7 @@
 #define PWM_MAX_FREQ_HZ 490
 #define PWM_MIN_PULSE_US 500
 #define PWM_MAX_PULSE_US 2500
-#define PWM_DUTY_BITS 15
+#define PWM_DUTY_BITS 14
 #define PWM_DUTY_MAX (1U << PWM_DUTY_BITS)
 
 #define DSHOT_RMT_RESOLUTION_HZ 20000000U
@@ -254,7 +254,7 @@ esp_err_t signal_generator_start_pwm(
 
     ledc_timer_config_t timer_cfg = {
         .speed_mode = LEDC_LOW_SPEED_MODE,
-        .duty_resolution = LEDC_TIMER_15_BIT,
+        .duty_resolution = LEDC_TIMER_14_BIT,
         .timer_num = LEDC_TIMER_0,
         .freq_hz = freq_hz,
         .clk_cfg = LEDC_AUTO_CLK,
@@ -335,7 +335,7 @@ esp_err_t signal_generator_start_dshot(
         return err;
     }
 
-    rmt_copy_encoder_config_t encoder_cfg = {0};
+    rmt_copy_encoder_config_t encoder_cfg = {};
     err = rmt_new_copy_encoder(&encoder_cfg, &rmt_encoder);
     if (err != ESP_OK) {
         rmt_del_channel(rmt_channel);
