@@ -1,7 +1,6 @@
 # ESCape32 Programmer
 
-General-purpose Python utility for the ESCape32 serial bootloader and the
-ESP32-C3 ESCape32 Link adapter.
+General-purpose Python utility for the ESCape32 serial bootloader and the ESP32-C3 ESCape32 Link adapter.
 
 ## Requirements
 
@@ -20,90 +19,26 @@ py .\escape32_programmer.py --list-ports
 
 ## ESCape32 target operations
 
-Read bootloader and installed firmware information:
-
 ```powershell
 py .\escape32_programmer.py --port COM7 info
-```
-
-Inspect an application image without hardware:
-
-```powershell
 py .\escape32_programmer.py inspect-image .\ESCape32-target.bin
-```
-
-Program an application image and read it back for verification:
-
-```powershell
 py .\escape32_programmer.py --port COM7 flash .\ESCape32-target.bin
-```
-
-Skip the interactive confirmation:
-
-```powershell
-py .\escape32_programmer.py --port COM7 flash .\ESCape32-target.bin --yes
-```
-
-Skip read-back verification only when explicitly required:
-
-```powershell
-py .\escape32_programmer.py --port COM7 flash .\ESCape32-target.bin --no-verify
-```
-
-Update the ESCape32 bootloader:
-
-```powershell
 py .\escape32_programmer.py --port COM7 bootloader .\bootloader.bin
-```
-
-Set write protection:
-
-```powershell
 py .\escape32_programmer.py --port COM7 set-wrp 0
-py .\escape32_programmer.py --port COM7 set-wrp 1
-py .\escape32_programmer.py --port COM7 set-wrp 2
 ```
 
-The application updater follows the ESCape32 signature-last strategy:
-for images larger than two 1 KiB blocks, blocks 0 and 1 are invalidated first,
-blocks 2..N are written, and blocks 0 and 1 are written last.
+Application flashing uses the ESCape32 signature-last strategy and performs read-back verification by default.
 
-## ESCape32 Link adapter operations
-
-Adapter information:
+## Adapter / Wi-Fi
 
 ```powershell
 py .\escape32_programmer.py --port COM7 adapter info
-```
-
-Wi-Fi state:
-
-```powershell
 py .\escape32_programmer.py --port COM7 adapter wifi status
-```
-
-Enable Wi-Fi persistently:
-
-```powershell
-py .\escape32_programmer.py --port COM7 adapter wifi on
-```
-
-Enable and reboot immediately:
-
-```powershell
 py .\escape32_programmer.py --port COM7 adapter wifi on --reboot
-```
-
-Disable Wi-Fi persistently:
-
-```powershell
 py .\escape32_programmer.py --port COM7 adapter wifi off --reboot
 ```
 
-Wi-Fi is OFF by default. The setting is stored in the adapter NVS and becomes
-the active runtime state after reboot.
-
-When Wi-Fi is active, the original WiFi-Link behavior is retained:
+Wi-Fi is OFF by default. The setting is stored in NVS and takes effect after reboot. With Wi-Fi enabled, the original WiFi-Link behavior remains available:
 
 ```text
 AP        ESCape32-WiFi-Link
@@ -111,20 +46,70 @@ Browser   http://192.168.4.1
 mDNS      http://escape32.local
 ```
 
-Manual ownership commands are also available for diagnostics:
+## PWM / DShot signal generator
+
+The ESP32-C3 can temporarily switch the ESC signal path from UART programming mode to PWM or DShot generation.
+
+Signal status:
 
 ```powershell
-py .\escape32_programmer.py --port COM7 adapter acquire
-py .\escape32_programmer.py --port COM7 adapter release
+py .\escape32_programmer.py --port COM7 adapter signal status
 ```
 
-Normal USB ESC traffic automatically acquires a short USB ownership lease, so
-these commands are not required for normal `info` or `flash` operation.
+PWM, 50..490 Hz:
 
-## Target validation
+```powershell
+py .\escape32_programmer.py --port COM7 adapter signal pwm --freq 50 --pulse-us 1500
+```
 
-The programmer is not tied to a specific board. Optional expectations can be
-used when a test needs stricter validation:
+A 0..100% helper is also available and maps to 1000..2000 us:
+
+```powershell
+py .\escape32_programmer.py --port COM7 adapter signal pwm --freq 50 --throttle 50
+```
+
+DShot150 / DShot300 / DShot600:
+
+```powershell
+py .\escape32_programmer.py --port COM7 adapter signal dshot --speed 600 --value 500
+```
+
+Optional DShot controls:
+
+```powershell
+py .\escape32_programmer.py --port COM7 adapter signal dshot --speed 300 --value 500 --rate-hz 1000 --telemetry
+```
+
+PWM/DShot commands run in the foreground and refresh the adapter watchdog. Press `Ctrl+C` to stop and automatically return the signal pin to UART mode. A fixed test duration can be used instead:
+
+```powershell
+py .\escape32_programmer.py --port COM7 adapter signal pwm --freq 50 --pulse-us 1500 --duration 10
+```
+
+Explicit stop:
+
+```powershell
+py .\escape32_programmer.py --port COM7 adapter signal stop
+```
+
+Signal modes:
+
+```text
+UART   GPIO2 TX + GPIO4 RX, ESCape32 bootloader / CLI
+PWM    GPIO4 push-pull output through the existing 220-ohm SIG path
+DSHOT  GPIO4 push-pull RMT output through the existing 220-ohm SIG path
+```
+
+When PWM or DShot is active, USB owns the ESC signal path and Wi-Fi ESC traffic is blocked. The control watchdog returns the adapter to UART mode if host refresh stops.
+
+## Diagnostics
+
+```powershell
+py .\escape32_programmer.py --self-test
+py .\escape32_programmer.py --port COM7 --verbose info
+```
+
+## Optional target validation
 
 ```powershell
 py .\escape32_programmer.py `
@@ -136,23 +121,4 @@ py .\escape32_programmer.py `
   info
 ```
 
-## Diagnostics
-
-Raw serial traffic:
-
-```powershell
-py .\escape32_programmer.py --port COM7 --verbose info
-```
-
-Local protocol/parser self-test:
-
-```powershell
-py .\escape32_programmer.py --self-test
-```
-
-## Transport notes
-
-The ESCape32 bootloader link is 38400 baud, 8N1, using the ESCape32
-single-wire request/response protocol. On ESP32-C3 WiFi-Link hardware the host
-side uses native USB Serial/JTAG; the COM-port baud setting does not determine
-the USB physical transfer rate.
+The programmer itself is not tied to a specific ESC board or project name.

@@ -1,5 +1,7 @@
 idf_component_register(
-    SRCS main.c
+    SRCS
+        link_main.c
+        signal_generator.c
     PRIV_REQUIRES
         espressif__mdns
         nvs_flash
@@ -7,8 +9,11 @@ idf_component_register(
         esp_http_server
         esp_netif
         esp_event
+        esp_timer
         lwip
         esp_driver_gpio
+        esp_driver_ledc
+        esp_driver_rmt
         esp_driver_uart
         esp_driver_usb_serial_jtag
 )
