@@ -1,17 +1,25 @@
 # Changelog
 
+## 1.2.0
+
+- Added ESP32-C3 ESCape32 Link adapter control protocol.
+- Added `adapter info`.
+- Added persistent Wi-Fi `status`, `on`, and `off` commands.
+- Added adapter reboot command.
+- Added diagnostic USB ownership acquire/release commands.
+- Kept the programmer target-generic; no project-specific target is hard-coded.
+- Retained application programming, signature-last update ordering, read-back
+  verification, bootloader update, and write-protection control.
+
 ## 1.1.0
 
-- Renamed the tool to the generic **ESCape32 Programmer**.
-- Removed product-specific identity assumptions from the default workflow.
-- Added application firmware programming via `CMD_WRITE`.
-- Added signature invalidation and signature-last block ordering based on the
-  reference ESCape32 updater.
-- Added per-block CRC / ACK handling.
-- Added application read-back verification (enabled by default).
-- Added post-flash firmware metadata verification.
-- Added ESCape32 bootloader update via `CMD_UPDATE`.
-- Added write-protection control via `CMD_SETWRP`.
-- Added generic `--expect-*` validation options.
-- Preserved Windows USB serial behavior: 32-byte host TX chunks without
-  per-chunk `Serial.flush()`.
+- Added general ESCape32 application programming via `CMD_WRITE`.
+- Added read-back verification.
+- Added bootloader update via `CMD_UPDATE`.
+- Added write-protection control.
+- Added application image inspection and optional target expectations.
+
+## 1.0.1
+
+- Initial read-only bootloader bring-up utility.
+- Removed per-write serial flush that could aggravate USB bridge back-pressure.

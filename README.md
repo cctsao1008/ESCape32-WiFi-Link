@@ -1,23 +1,41 @@
 ESCape32 Wi-Fi Link
 ===================
 
-ESP32-based embedded configurator for [ESCape32](https://github.com/neoxic/ESCape32) electronic speed controllers.
+ESP32-based link/configurator for [ESCape32](https://github.com/neoxic/ESCape32)
+electronic speed controllers.
 
-USB-only branch
----------------
+USB + Optional Wi-Fi
+--------------------
 
-The `usb-only` branch repurposes the ESP32-C3 WiFi-Link hardware as a transparent
-USB Serial/JTAG <-> ESC serial bridge. Wi-Fi, HTTP, WebSocket, mDNS, DNS, and the
-embedded Web UI are not initialized or built in this branch.
+This branch keeps the original WiFi-Link AP/Web UI and adds an always-available
+native USB Serial/JTAG path for the ESCape32 Programmer.
 
-Data path:
+Runtime model:
 
-```
+```text
 Host PC
   <-> ESP32-C3 native USB Serial/JTAG
-  <-> UART1, 38400 baud, 8N1
-  <-> ESCape32 single-wire interface
+  <-> ownership mux
+  <-> UART 38400, single-wire
+  <-> ESCape32
+
+Phone / Notebook
+  <-> Wi-Fi AP (optional, default OFF)
+  <-> original Web UI
+  <-> ownership mux
+  <-> ESCape32
 ```
+
+Key behavior:
+
+- USB transport is always enabled.
+- Wi-Fi is **OFF by default** to reduce power consumption and heat.
+- Wi-Fi ON/OFF is persistent in NVS and takes effect after reboot.
+- When Wi-Fi is ON, the original AP, `192.168.4.1`, `escape32.local`,
+  WebSocket protocol, and browser UI are retained.
+- USB and Wi-Fi share the ESC interface through ownership arbitration.
+- USB traffic is continuously consumed even while Wi-Fi owns the ESC, avoiding
+  native USB back-pressure/write-timeout behavior.
 
 ESP32-C3 defaults:
 
@@ -29,63 +47,51 @@ ESP32-C3 defaults:
 
 (*) active low
 
-A general-purpose host programmer is included under:
+Building
+--------
 
-```
-tools/escape32-programmer/
-```
+ESP-IDF v5.5 is the current baseline:
 
-It supports bootloader probe/info, application firmware programming and
-read-back verification, bootloader update, and write-protection control.
-
-Building the USB-only firmware
-------------------------------
-
-Install ESP-IDF v5.5, then run:
-
-```
+```text
 idf.py set-target esp32c3
 idf.py build
-```
-
-To flash the ESP32-C3 bridge:
-
-```
 idf.py -p <PORT> flash
 ```
+
+The Web UI assets are gzip-compressed during the build, matching the upstream
+WiFi-Link build flow.
 
 ESCape32 Programmer
 -------------------
 
-Install the Python dependency:
+The general-purpose host utility is under:
 
-```powershell
-cd tools\escape32-programmer
-py -m pip install -r requirements.txt
+```text
+tools/escape32-programmer/
 ```
 
-List serial ports:
+Examples:
 
 ```powershell
 py .\escape32_programmer.py --list-ports
-```
-
-Read bootloader / firmware information:
-
-```powershell
 py .\escape32_programmer.py --port COM7 info
-```
-
-Program an ESCape32 application image:
-
-```powershell
 py .\escape32_programmer.py --port COM7 flash .\ESCape32-target.bin
 ```
 
-See `tools/escape32-programmer/README.md` for the complete CLI.
+Adapter control:
 
-Upstream Wi-Fi Link
--------------------
+```powershell
+py .\escape32_programmer.py --port COM7 adapter info
+py .\escape32_programmer.py --port COM7 adapter wifi status
+py .\escape32_programmer.py --port COM7 adapter wifi on --reboot
+py .\escape32_programmer.py --port COM7 adapter wifi off --reboot
+```
 
-The original Wi-Fi Link implementation and releases are maintained by
+When Wi-Fi is enabled and the adapter reboots, connect to the original
+`ESCape32-WiFi-Link` AP and open `escape32.local` or `192.168.4.1`.
+
+Upstream
+--------
+
+The original project is maintained at
 [neoxic/ESCape32-WiFi-Link](https://github.com/neoxic/ESCape32-WiFi-Link).
