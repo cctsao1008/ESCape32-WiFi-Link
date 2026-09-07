@@ -5,6 +5,10 @@ CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 CONFIG_LOG_DEFAULT_LEVEL_NONE=y
 CONFIG_BOOTLOADER_LOG_LEVEL_NONE=y
 
+# ESCape32 WiFi-Link 4IN1 board status LED test: ESP32-C3 GPIO9, active low.
+CONFIG_LED_PIN=9
+CONFIG_LED_INV=y
+
 # Original WiFi-Link Web UI services. They are linked into the image but
 # initialized only when the persistent wifi_enabled setting is ON.
 CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS=n
