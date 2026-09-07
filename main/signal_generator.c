@@ -1,5 +1,6 @@
 #include "signal_generator.h"
 
+#include <stddef.h>
 #include <string.h>
 
 #include "driver/gpio.h"
@@ -20,17 +21,17 @@
 #define PWM_DUTY_MAX (1U << PWM_DUTY_BITS)
 
 #define DSHOT_RMT_RESOLUTION_HZ 20000000U
-#define DSHOT_SYMBOL_COUNT 17
+#define DSHOT_FRAME_BITS 16U
 #define DSHOT_MIN_RATE_HZ 50
 #define DSHOT_MAX_RATE_HZ 4000
+#define DSHOT_MIN_GAP_US 20U
+#define DSHOT_MAX_SYMBOLS 32U
+#define RMT_MAX_DURATION_TICKS 0x7fffU
 
 #define SIGNAL_WATCHDOG_TASK_STACK 3072
-#define SIGNAL_DSHOT_TASK_STACK 3072
 #define SIGNAL_TASK_PRIORITY 9
 
 static SemaphoreHandle_t signal_mutex;
-static TaskHandle_t dshot_task_handle;
-static esp_timer_handle_t dshot_timer;
 
 static int uart_num_cfg;
 static int uart_tx_gpio_cfg;
@@ -42,7 +43,8 @@ static int64_t last_keepalive_us;
 
 static rmt_channel_handle_t rmt_channel;
 static rmt_encoder_handle_t rmt_encoder;
-static rmt_symbol_word_t dshot_symbols[DSHOT_SYMBOL_COUNT];
+static rmt_symbol_word_t dshot_symbols[DSHOT_MAX_SYMBOLS];
+static size_t dshot_symbol_count;
 
 static void restore_uart_locked(void)
 {
@@ -60,15 +62,12 @@ static void restore_uart_locked(void)
 
 static void stop_locked(void)
 {
-    if (dshot_timer && esp_timer_is_active(dshot_timer)) {
-        esp_timer_stop(dshot_timer);
-    }
-
     if (current_status.mode == SIGNAL_MODE_PWM) {
         ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
     }
 
     if (rmt_channel) {
+        /* rmt_disable() stops an active hardware loop before resources are freed. */
         rmt_disable(rmt_channel);
         if (rmt_encoder) {
             rmt_del_encoder(rmt_encoder);
@@ -78,6 +77,7 @@ static void stop_locked(void)
         rmt_channel = NULL;
     }
 
+    dshot_symbol_count = 0;
     memset(&current_status, 0, sizeof current_status);
     current_status.mode = SIGNAL_MODE_UART;
     current_status.gpio = (uint8_t)signal_gpio_cfg;
@@ -105,7 +105,43 @@ static uint16_t dshot_make_frame(uint16_t value, bool telemetry)
     return (uint16_t)((packet << 4) | csum);
 }
 
-static void dshot_build_symbols(uint16_t speed, uint16_t value, bool telemetry)
+static bool dshot_append_low_ticks(uint32_t ticks, size_t *count)
+{
+    while (ticks > 0) {
+        if (*count >= DSHOT_MAX_SYMBOLS) return false;
+
+        uint32_t chunk = ticks;
+        uint32_t max_chunk = 2U * RMT_MAX_DURATION_TICKS;
+        if (chunk > max_chunk) chunk = max_chunk;
+
+        /*
+         * Keep both halves non-zero. A zero duration is used by some RMT paths
+         * as an end marker, so split each low-only symbol into two valid parts.
+         */
+        uint32_t duration0 = chunk / 2U;
+        uint32_t duration1 = chunk - duration0;
+        if (duration0 == 0 || duration1 == 0 ||
+            duration0 > RMT_MAX_DURATION_TICKS ||
+            duration1 > RMT_MAX_DURATION_TICKS) {
+            return false;
+        }
+
+        dshot_symbols[*count].level0 = 0;
+        dshot_symbols[*count].duration0 = duration0;
+        dshot_symbols[*count].level1 = 0;
+        dshot_symbols[*count].duration1 = duration1;
+        ++(*count);
+        ticks -= chunk;
+    }
+    return true;
+}
+
+static size_t dshot_build_symbols(
+    uint16_t speed,
+    uint16_t value,
+    bool telemetry,
+    uint16_t rate_hz
+)
 {
     /* speed is expressed as DShot150/300/600, i.e. in kbit/s. */
     uint32_t bit_rate_hz = (uint32_t)speed * 1000U;
@@ -113,52 +149,37 @@ static void dshot_build_symbols(uint16_t speed, uint16_t value, bool telemetry)
         (DSHOT_RMT_RESOLUTION_HZ + bit_rate_hz / 2U) / bit_rate_hz;
     uint32_t high_one = (bit_ticks * 3U + 2U) / 4U;
     uint32_t high_zero = (bit_ticks * 3U + 4U) / 8U;
+    uint32_t period_ticks =
+        (DSHOT_RMT_RESOLUTION_HZ + rate_hz / 2U) / rate_hz;
+    uint32_t frame_ticks = DSHOT_FRAME_BITS * bit_ticks;
+    uint32_t min_gap_ticks =
+        (DSHOT_RMT_RESOLUTION_HZ / 1000000U) * DSHOT_MIN_GAP_US;
+
+    if (period_ticks <= frame_ticks + min_gap_ticks) return 0;
+
     uint16_t frame = dshot_make_frame(value, telemetry);
+    size_t count = 0;
 
-    for (int i = 0; i < 16; ++i) {
-        bool one = (frame & (1U << (15 - i))) != 0;
+    for (uint32_t i = 0; i < DSHOT_FRAME_BITS; ++i) {
+        bool one = (frame & (1U << (15U - i))) != 0;
         uint32_t high = one ? high_one : high_zero;
-        dshot_symbols[i].level0 = 1;
-        dshot_symbols[i].duration0 = high;
-        dshot_symbols[i].level1 = 0;
-        dshot_symbols[i].duration1 = bit_ticks - high;
-    }
-
-    /* Explicit low inter-frame gap: 20 us. */
-    dshot_symbols[16].level0 = 0;
-    dshot_symbols[16].duration0 = DSHOT_RMT_RESOLUTION_HZ / 100000U;
-    dshot_symbols[16].level1 = 0;
-    dshot_symbols[16].duration1 = DSHOT_RMT_RESOLUTION_HZ / 100000U;
-}
-
-static void dshot_timer_cb(void *arg)
-{
-    (void)arg;
-    if (dshot_task_handle) xTaskNotifyGive(dshot_task_handle);
-}
-
-static void dshot_task(void *arg)
-{
-    (void)arg;
-    for (;;) {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-
-        xSemaphoreTake(signal_mutex, portMAX_DELAY);
-        if (current_status.mode == SIGNAL_MODE_DSHOT && rmt_channel && rmt_encoder) {
-            rmt_transmit_config_t tx_cfg = {0};
-            esp_err_t err = rmt_transmit(
-                rmt_channel,
-                rmt_encoder,
-                dshot_symbols,
-                sizeof dshot_symbols,
-                &tx_cfg
-            );
-            if (err == ESP_OK) {
-                rmt_tx_wait_all_done(rmt_channel, 10);
-            }
+        if (count >= DSHOT_MAX_SYMBOLS ||
+            high == 0 || high >= bit_ticks ||
+            high > RMT_MAX_DURATION_TICKS ||
+            bit_ticks - high > RMT_MAX_DURATION_TICKS) {
+            return 0;
         }
-        xSemaphoreGive(signal_mutex);
+
+        dshot_symbols[count].level0 = 1;
+        dshot_symbols[count].duration0 = high;
+        dshot_symbols[count].level1 = 0;
+        dshot_symbols[count].duration1 = bit_ticks - high;
+        ++count;
     }
+
+    /* Fill the rest of the requested frame period with a hardware-timed low gap. */
+    if (!dshot_append_low_ticks(period_ticks - frame_ticks, &count)) return 0;
+    return count;
 }
 
 static void watchdog_task(void *arg)
@@ -198,26 +219,6 @@ esp_err_t signal_generator_init(
     memset(&current_status, 0, sizeof current_status);
     current_status.mode = SIGNAL_MODE_UART;
     current_status.gpio = (uint8_t)signal_gpio_cfg;
-
-    esp_timer_create_args_t timer_args = {
-        .callback = dshot_timer_cb,
-        .name = "dshot-periodic",
-    };
-    esp_err_t err = esp_timer_create(&timer_args, &dshot_timer);
-    if (err != ESP_OK) return err;
-
-    if (
-        xTaskCreate(
-            dshot_task,
-            "dshot-tx",
-            SIGNAL_DSHOT_TASK_STACK,
-            NULL,
-            SIGNAL_TASK_PRIORITY,
-            &dshot_task_handle
-        ) != pdPASS
-    ) {
-        return ESP_ERR_NO_MEM;
-    }
 
     if (
         xTaskCreate(
@@ -324,12 +325,19 @@ esp_err_t signal_generator_start_dshot(
     stop_locked();
     prepare_generator_gpio_locked();
 
+    dshot_symbol_count = dshot_build_symbols(speed, value, telemetry, rate_hz);
+    if (dshot_symbol_count == 0 || dshot_symbol_count > 48) {
+        restore_uart_locked();
+        xSemaphoreGive(signal_mutex);
+        return ESP_ERR_INVALID_ARG;
+    }
+
     rmt_tx_channel_config_t tx_cfg = {
         .gpio_num = signal_gpio_cfg,
         .clk_src = RMT_CLK_SRC_DEFAULT,
         .resolution_hz = DSHOT_RMT_RESOLUTION_HZ,
         .mem_block_symbols = 48,
-        .trans_queue_depth = 2,
+        .trans_queue_depth = 1,
     };
     esp_err_t err = rmt_new_tx_channel(&tx_cfg, &rmt_channel);
     if (err != ESP_OK) {
@@ -359,7 +367,26 @@ esp_err_t signal_generator_start_dshot(
         return err;
     }
 
-    dshot_build_symbols(speed, value, telemetry);
+    /*
+     * The entire DShot frame plus the inter-frame low gap is one RMT
+     * transaction. Infinite hardware loop mode therefore determines both
+     * bit timing and frame cadence without FreeRTOS/esp_timer scheduling.
+     */
+    rmt_transmit_config_t tx_loop_cfg = {
+        .loop_count = -1,
+    };
+    err = rmt_transmit(
+        rmt_channel,
+        rmt_encoder,
+        dshot_symbols,
+        dshot_symbol_count * sizeof(dshot_symbols[0]),
+        &tx_loop_cfg
+    );
+    if (err != ESP_OK) {
+        stop_locked();
+        xSemaphoreGive(signal_mutex);
+        return err;
+    }
 
     memset(&current_status, 0, sizeof current_status);
     current_status.mode = SIGNAL_MODE_DSHOT;
@@ -370,13 +397,6 @@ esp_err_t signal_generator_start_dshot(
     current_status.dshot_telemetry = telemetry;
     current_status.watchdog_ms = watchdog_ms;
     last_keepalive_us = esp_timer_get_time();
-
-    err = esp_timer_start_periodic(dshot_timer, 1000000ULL / rate_hz);
-    if (err != ESP_OK) {
-        stop_locked();
-        xSemaphoreGive(signal_mutex);
-        return err;
-    }
 
     xSemaphoreGive(signal_mutex);
     return ESP_OK;
