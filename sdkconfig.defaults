@@ -5,8 +5,8 @@ CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 CONFIG_LOG_DEFAULT_LEVEL_NONE=y
 CONFIG_BOOTLOADER_LOG_LEVEL_NONE=y
 
-# ESCape32 WiFi-Link 4IN1 board status LED test: ESP32-C3 GPIO9, active low.
-CONFIG_LED_PIN=9
+# ESP32-C3 status LED baseline from upstream WiFi-Link: GPIO8, active low.
+CONFIG_LED_PIN=8
 CONFIG_LED_INV=y
 
 # Original WiFi-Link Web UI services. They are linked into the image but
