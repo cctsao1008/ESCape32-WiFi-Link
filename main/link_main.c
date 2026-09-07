@@ -6,6 +6,22 @@
  * generation while keeping the existing Wi-Fi Web UI and ESCape32 transport.
  */
 
+#include "driver/gpio.h"
+
+/*
+ * main.c contains legacy activity LED writes.  ESCape32 Link owns the
+ * physical status LED through link_led_task(), so suppress those writes while
+ * including the legacy implementation.  main.c has no other direct
+ * gpio_set_level() use.
+ */
+static esp_err_t link_legacy_led_noop(gpio_num_t gpio_num, uint32_t level)
+{
+    (void)gpio_num;
+    (void)level;
+    return ESP_OK;
+}
+
+#define gpio_set_level link_legacy_led_noop
 #define app_main legacy_app_main
 #define usb_to_uart_task legacy_usb_to_uart_task
 #define uart_to_usb_task legacy_uart_to_usb_task
@@ -13,6 +29,7 @@
 #undef uart_to_usb_task
 #undef usb_to_uart_task
 #undef app_main
+#undef gpio_set_level
 
 #include "signal_generator.h"
 
@@ -66,6 +83,15 @@ typedef struct {
 
 static volatile uint8_t link_led_activity_ticks;
 
+static void link_led_write(bool on)
+{
+    int level = on ? 1 : 0;
+#ifdef CONFIG_LED_INV
+    level = !level;
+#endif
+    gpio_set_level(CONFIG_LED_PIN, level);
+}
+
 static void link_led_note_activity(void)
 {
     link_led_activity_ticks = LINK_LED_ACTIVITY_TICKS;
@@ -100,7 +126,7 @@ static void link_led_task(void *arg)
             on = (phase % 16U) == 0U;
         }
 
-        setled(on ? 1 : 0);
+        link_led_write(on);
         ++phase;
         vTaskDelay(pdMS_TO_TICKS(LINK_LED_TICK_MS));
     }
@@ -457,7 +483,7 @@ static void link_uart_to_usb_task(void *arg)
 void app_main(void)
 {
     gpio_set_direction(CONFIG_LED_PIN, GPIO_MODE_OUTPUT);
-    setled(1);
+    link_led_write(true);
 
     esp_log_level_set("httpd_uri", ESP_LOG_ERROR);
     esp_log_level_set("httpd_txrx", ESP_LOG_ERROR);
@@ -543,7 +569,7 @@ void app_main(void)
     if (wifi_configured) start_wifi_services();
 
     /* Boot indication ends here; the status task owns the LED from now on. */
-    setled(0);
+    link_led_write(false);
     res = xTaskCreate(
         link_led_task,
         "link-led",
