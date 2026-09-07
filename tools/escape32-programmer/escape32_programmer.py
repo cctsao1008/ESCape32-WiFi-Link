@@ -20,7 +20,7 @@ except ImportError:
     serial = None
     list_ports = None
 
-TOOL_VERSION = "1.3.0"
+TOOL_VERSION = "1.4.0"
 
 CMD_PROBE = 0
 CMD_INFO = 1
@@ -55,6 +55,9 @@ ADAPTER_CMD_SIGNAL_PWM = 8
 ADAPTER_CMD_SIGNAL_DSHOT = 9
 ADAPTER_CMD_SIGNAL_STOP = 10
 ADAPTER_CMD_SIGNAL_KEEPALIVE = 11
+ADAPTER_CMD_GPIO_GET = 12
+ADAPTER_CMD_GPIO_SET = 13
+ADAPTER_CMD_GPIO_RELEASE = 14
 
 ADAPTER_STATUS = {
     0: "OK",
@@ -68,6 +71,7 @@ ADAPTER_INFO_STRUCT = struct.Struct("<BBBBBBBBIBB")
 SIGNAL_INFO_STRUCT = struct.Struct("<BBBBHHHHHH")
 SIGNAL_PWM_STRUCT = struct.Struct("<HHH")
 SIGNAL_DSHOT_STRUCT = struct.Struct("<HHHHB")
+GPIO_INFO_STRUCT = struct.Struct("<BBBB")
 
 
 class ProgrammerError(RuntimeError):
@@ -162,6 +166,14 @@ class SignalInfo:
     @property
     def mode_name(self) -> str:
         return {0: "UART", 1: "PWM", 2: "DSHOT"}.get(self.mode, f"UNKNOWN({self.mode})")
+
+
+@dataclass
+class GpioInfo:
+    status: int
+    gpio: int
+    level: int
+    override_active: bool
 
 
 def require_pyserial() -> None:
@@ -519,6 +531,13 @@ class Escape32Adapter:
         v = SIGNAL_INFO_STRUCT.unpack(payload)
         return SignalInfo(v[0], v[1], v[2], bool(v[3]), v[4], v[5], v[6], v[7], v[8], v[9])
 
+    @staticmethod
+    def parse_gpio(payload: bytes) -> GpioInfo:
+        if len(payload) != GPIO_INFO_STRUCT.size:
+            raise ProgrammerError(f"Unexpected GPIO info length: {len(payload)}")
+        v = GPIO_INFO_STRUCT.unpack(payload)
+        return GpioInfo(v[0], v[1], v[2], bool(v[3]))
+
     def info(self) -> AdapterInfo:
         return self.parse_info(self.request_raw(ADAPTER_CMD_INFO))
 
@@ -553,6 +572,15 @@ class Escape32Adapter:
 
     def signal_stop(self) -> SignalInfo:
         return self.parse_signal(self.request_raw(ADAPTER_CMD_SIGNAL_STOP))
+
+    def gpio_get(self, gpio: int) -> GpioInfo:
+        return self.parse_gpio(self.request_raw(ADAPTER_CMD_GPIO_GET, bytes((gpio,))))
+
+    def gpio_set(self, gpio: int, level: int) -> GpioInfo:
+        return self.parse_gpio(self.request_raw(ADAPTER_CMD_GPIO_SET, bytes((gpio, level))))
+
+    def gpio_release(self, gpio: int) -> GpioInfo:
+        return self.parse_gpio(self.request_raw(ADAPTER_CMD_GPIO_RELEASE, bytes((gpio,))))
 
 
 def print_boot_info(info: BootInfo) -> None:
@@ -609,6 +637,12 @@ def print_signal_info(info: SignalInfo) -> None:
         print(f"Watchdog................ {info.watchdog_ms} ms")
 
 
+def print_gpio_info(info: GpioInfo) -> None:
+    print(f"GPIO.................... {info.gpio}")
+    print(f"Raw level............... {info.level}")
+    print(f"Manual override......... {'ON' if info.override_active else 'OFF'}")
+
+
 def validate_expectations(args, info: BootInfo, fw: Optional[FirmwareInfo]) -> None:
     issues = []
     if args.expect_boot_revision is not None and info.revision != args.expect_boot_revision:
@@ -636,6 +670,8 @@ def self_test() -> int:
     s = SIGNAL_INFO_STRUCT.pack(0, 2, 4, 0, 0, 0, 600, 48, 1000, 1500)
     sig = Escape32Adapter.parse_signal(s)
     assert sig.mode == 2 and sig.dshot_speed == 600 and sig.dshot_value == 48
+    g = Escape32Adapter.parse_gpio(GPIO_INFO_STRUCT.pack(0, 8, 1, 1))
+    assert g.gpio == 8 and g.level == 1 and g.override_active
     print("Self-test: PASS")
     return 0
 
@@ -699,6 +735,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     adapter_sub.add_parser("reboot")
     adapter_sub.add_parser("acquire")
     adapter_sub.add_parser("release")
+
+    gpio_p = adapter_sub.add_parser("gpio")
+    gpio_sub = gpio_p.add_subparsers(dest="gpio_action", required=True)
+    gpio_get = gpio_sub.add_parser("get")
+    gpio_get.add_argument("pin", type=int)
+    gpio_set = gpio_sub.add_parser("set")
+    gpio_set.add_argument("pin", type=int)
+    gpio_set.add_argument("level", type=int, choices=(0, 1))
+    gpio_release = gpio_sub.add_parser("release")
+    gpio_release.add_argument("pin", type=int)
 
     signal_p = adapter_sub.add_parser("signal")
     signal_sub = signal_p.add_subparsers(dest="signal_action", required=True)
@@ -786,6 +832,15 @@ def run_adapter_command(args) -> int:
             print_adapter_info(adapter.acquire())
         elif args.adapter_command == "release":
             print_adapter_info(adapter.release())
+        elif args.adapter_command == "gpio":
+            if not 0 <= args.pin <= 255:
+                raise ProgrammerError("GPIO pin must be 0..255")
+            if args.gpio_action == "get":
+                print_gpio_info(adapter.gpio_get(args.pin))
+            elif args.gpio_action == "set":
+                print_gpio_info(adapter.gpio_set(args.pin, args.level))
+            elif args.gpio_action == "release":
+                print_gpio_info(adapter.gpio_release(args.pin))
         elif args.adapter_command == "signal":
             if args.signal_action == "status":
                 print_signal_info(adapter.signal_status())

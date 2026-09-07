@@ -38,6 +38,9 @@ static esp_err_t link_legacy_led_noop(gpio_num_t gpio_num, uint32_t level)
 #define ADAPTER_CMD_SIGNAL_DSHOT     9
 #define ADAPTER_CMD_SIGNAL_STOP      10
 #define ADAPTER_CMD_SIGNAL_KEEPALIVE 11
+#define ADAPTER_CMD_GPIO_GET         12
+#define ADAPTER_CMD_GPIO_SET         13
+#define ADAPTER_CMD_GPIO_RELEASE     14
 
 #define SIGNAL_STATUS_UART   0
 #define SIGNAL_STATUS_PWM    1
@@ -75,6 +78,13 @@ typedef struct __attribute__((__packed__)) {
     uint16_t watchdog_ms;
 } SignalInfoPayload;
 
+typedef struct __attribute__((__packed__)) {
+    uint8_t status;
+    uint8_t gpio;
+    uint8_t level;
+    uint8_t override_active;
+} GpioInfoPayload;
+
 typedef struct {
     uint8_t buf[8 + sizeof(AdapterHeader) + ADAPTER_MAX_PAYLOAD + 4];
     size_t len;
@@ -82,6 +92,8 @@ typedef struct {
 } LinkAdapterParser;
 
 static volatile uint8_t link_led_activity_ticks;
+static volatile bool link_gpio_override_active;
+static volatile uint8_t link_gpio_override_pin;
 
 static void link_led_write(bool on)
 {
@@ -105,6 +117,15 @@ static void link_led_task(void *arg)
     for (;;) {
         signal_generator_status_t sig;
         signal_generator_get_status(&sig);
+
+        if (
+            link_gpio_override_active &&
+            link_gpio_override_pin == (uint8_t)CONFIG_LED_PIN
+        ) {
+            ++phase;
+            vTaskDelay(pdMS_TO_TICKS(LINK_LED_TICK_MS));
+            continue;
+        }
 
         bool on = false;
         if (wifi_configured != wifi_active) {
@@ -254,6 +275,120 @@ static uint8_t link_signal_keepalive(void)
     signal_generator_keepalive();
     link_owner_touch(LINK_OWNER_USB);
     return ADAPTER_STATUS_OK;
+}
+
+static bool link_gpio_allowed(uint8_t gpio)
+{
+    /* Keep diagnostic writes away from UART, SIG and native USB pins. */
+    return gpio == (uint8_t)CONFIG_LED_PIN;
+}
+
+static void link_fill_gpio_info(
+    GpioInfoPayload *payload,
+    uint8_t status,
+    uint8_t gpio
+)
+{
+    memset(payload, 0, sizeof *payload);
+    payload->status = status;
+    payload->gpio = gpio;
+    if (link_gpio_allowed(gpio)) {
+        payload->level = gpio_get_level((gpio_num_t)gpio) ? 1 : 0;
+        payload->override_active =
+            link_gpio_override_active && link_gpio_override_pin == gpio ? 1 : 0;
+    }
+}
+
+static void link_send_gpio_response(
+    uint8_t command,
+    uint32_t sequence,
+    uint8_t status,
+    uint8_t gpio
+)
+{
+    uint8_t frame[8 + sizeof(AdapterHeader) + sizeof(GpioInfoPayload) + 4];
+    AdapterHeader header = {
+        .version = ADAPTER_PROTOCOL_VERSION,
+        .command = command | 0x80,
+        .length = sizeof(GpioInfoPayload),
+        .sequence = sequence,
+    };
+    GpioInfoPayload payload;
+    link_fill_gpio_info(&payload, status, gpio);
+
+    int pos = 0;
+    memcpy(frame + pos, adapter_response_magic, sizeof adapter_response_magic);
+    pos += sizeof adapter_response_magic;
+    memcpy(frame + pos, &header, sizeof header);
+    pos += sizeof header;
+    memcpy(frame + pos, &payload, sizeof payload);
+    pos += sizeof payload;
+
+    uint32_t crc = esp_crc32_le(
+        0,
+        frame + sizeof adapter_response_magic,
+        sizeof header + sizeof payload
+    );
+    memcpy(frame + pos, &crc, sizeof crc);
+    pos += sizeof crc;
+    usb_write_all(frame, pos);
+}
+
+static void link_process_gpio_frame(
+    const AdapterHeader *header,
+    const uint8_t *payload
+)
+{
+    uint8_t status = ADAPTER_STATUS_OK;
+    uint8_t gpio = header->length > 0 ? payload[0] : 0xffU;
+
+    switch (header->command) {
+        case ADAPTER_CMD_GPIO_GET:
+            if (header->length != 1 || !link_gpio_allowed(gpio)) {
+                status = ADAPTER_STATUS_BAD_ARG;
+            }
+            break;
+
+        case ADAPTER_CMD_GPIO_SET:
+            if (
+                header->length != 2 ||
+                !link_gpio_allowed(gpio) ||
+                payload[1] > 1
+            ) {
+                status = ADAPTER_STATUS_BAD_ARG;
+                break;
+            }
+            link_gpio_override_pin = gpio;
+            link_gpio_override_active = true;
+            gpio_set_direction((gpio_num_t)gpio, GPIO_MODE_OUTPUT);
+            gpio_set_level((gpio_num_t)gpio, payload[1]);
+            break;
+
+        case ADAPTER_CMD_GPIO_RELEASE:
+            if (header->length != 1 || !link_gpio_allowed(gpio)) {
+                status = ADAPTER_STATUS_BAD_ARG;
+                break;
+            }
+            if (link_gpio_override_active && link_gpio_override_pin == gpio) {
+                link_gpio_override_active = false;
+            }
+            if (gpio == (uint8_t)CONFIG_LED_PIN) {
+                gpio_set_direction(CONFIG_LED_PIN, GPIO_MODE_OUTPUT);
+            }
+            break;
+
+        default:
+            status = ADAPTER_STATUS_BAD_ARG;
+            break;
+    }
+
+    link_send_gpio_response(header->command, header->sequence, status, gpio);
+}
+
+static bool link_is_gpio_command(uint8_t command)
+{
+    return command >= ADAPTER_CMD_GPIO_GET &&
+        command <= ADAPTER_CMD_GPIO_RELEASE;
 }
 
 static void link_process_signal_frame(
@@ -412,6 +547,8 @@ static void link_adapter_parser_feed(
     if (crc_wire == crc_calc) {
         if (link_is_signal_command(header.command)) {
             link_process_signal_frame(&header, payload);
+        } else if (link_is_gpio_command(header.command)) {
+            link_process_gpio_frame(&header, payload);
         } else {
             adapter_process_frame(&header, payload);
         }
