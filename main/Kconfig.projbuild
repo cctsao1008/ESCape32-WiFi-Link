@@ -21,7 +21,7 @@ menu "ESCape32-WiFi-Link configuration"
 	config LED_PIN
 		int "LED pin number"
 		range ENV_GPIO_RANGE_MIN ENV_GPIO_OUT_RANGE_MAX
-		default 8 if IDF_TARGET_ESP32C3
+		default 9 if IDF_TARGET_ESP32C3
 		default 15 if IDF_TARGET_ESP32S2
 		default 2
 	config LED_INV
