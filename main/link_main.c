@@ -381,7 +381,7 @@ static void link_process_gpio_frame(
             }
             link_gpio_override_pin = gpio;
             link_gpio_override_active = true;
-            gpio_set_direction((gpio_num_t)gpio, GPIO_MODE_OUTPUT);
+            gpio_set_direction((gpio_num_t)gpio, GPIO_MODE_INPUT_OUTPUT);
             gpio_set_level((gpio_num_t)gpio, payload[1]);
             break;
 
@@ -394,7 +394,7 @@ static void link_process_gpio_frame(
                 link_gpio_override_active = false;
             }
             if (gpio == (uint8_t)CONFIG_LED_PIN) {
-                gpio_set_direction(CONFIG_LED_PIN, GPIO_MODE_OUTPUT);
+                gpio_set_direction(CONFIG_LED_PIN, GPIO_MODE_INPUT_OUTPUT);
             }
             break;
 
@@ -653,7 +653,7 @@ static void link_uart_to_usb_task(void *arg)
 
 void app_main(void)
 {
-    gpio_set_direction(CONFIG_LED_PIN, GPIO_MODE_OUTPUT);
+    gpio_set_direction(CONFIG_LED_PIN, GPIO_MODE_INPUT_OUTPUT);
     link_led_write(true);
 
     esp_log_level_set("httpd_uri", ESP_LOG_ERROR);
