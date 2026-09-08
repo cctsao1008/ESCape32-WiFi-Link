@@ -20,7 +20,7 @@ except ImportError:
     serial = None
     list_ports = None
 
-TOOL_VERSION = "1.7.0"
+TOOL_VERSION = "1.7.1"
 
 CMD_PROBE = 0
 CMD_INFO = 1
@@ -311,10 +311,20 @@ class Escape32Serial:
         self.verbose = verbose
         self.ser = None
 
+    def _set_safe_control_lines(self) -> None:
+        # ESP32-C3 USB Serial/JTAG interprets CDC RTS=1,DTR=0 as a SoC reset.
+        # Keep the host port at RTS=0,DTR=0.  Clear RTS first so a later DTR
+        # transition during close cannot pass through the reset state.
+        self.ser.rts = False
+        self.ser.dtr = False
+
     def __enter__(self):
         try:
+            # Configure RTS/DTR before opening.  Passing the port directly to
+            # Serial() opens it immediately, which lets Windows/pySerial apply
+            # default control-line states before we can make them reset-safe.
             self.ser = serial.Serial(
-                port=self.port,
+                port=None,
                 baudrate=BAUDRATE,
                 bytesize=serial.EIGHTBITS,
                 parity=serial.PARITY_NONE,
@@ -322,7 +332,19 @@ class Escape32Serial:
                 timeout=0.050,
                 write_timeout=1.0,
             )
-        except serial.SerialException as exc:
+            self._set_safe_control_lines()
+            self.ser.port = self.port
+            self.ser.open()
+            # Reassert the safe state after open for drivers which briefly
+            # apply their own CDC control-line defaults while opening.
+            self._set_safe_control_lines()
+        except (serial.SerialException, OSError) as exc:
+            if self.ser is not None:
+                try:
+                    if self.ser.is_open:
+                        self.ser.close()
+                finally:
+                    self.ser = None
             raise ProgrammerError(f"Cannot open {self.port}: {exc}") from exc
         self.ser.reset_input_buffer()
         self.ser.reset_output_buffer()
@@ -330,8 +352,17 @@ class Escape32Serial:
 
     def __exit__(self, exc_type, exc, tb):
         if self.ser is not None:
-            self.ser.close()
-            self.ser = None
+            try:
+                if self.ser.is_open:
+                    # Put RTS low before DTR is released by close().  On the
+                    # ESP32-C3 native USB Serial/JTAG port, RTS=1,DTR=0 resets
+                    # the SoC and would discard adapter RAM state.
+                    self._set_safe_control_lines()
+            except (serial.SerialException, OSError):
+                pass
+            finally:
+                self.ser.close()
+                self.ser = None
 
     def _trace_tx(self, data: bytes) -> None:
         if self.verbose:
