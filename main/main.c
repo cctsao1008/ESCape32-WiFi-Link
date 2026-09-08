@@ -72,7 +72,7 @@
 #define ADAPTER_STATUS_INTERNAL   4
 
 #define ADAPTER_FW_MAJOR 1
-#define ADAPTER_FW_MINOR 0
+#define ADAPTER_FW_MINOR 1
 #define ADAPTER_FW_PATCH 0
 
 typedef enum {

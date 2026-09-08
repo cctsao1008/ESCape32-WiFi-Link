@@ -8,6 +8,7 @@
 #include "driver/rmt_encoder.h"
 #include "driver/rmt_tx.h"
 #include "driver/uart.h"
+#include "esp_rom_sys.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -27,6 +28,10 @@
 #define DSHOT_MIN_GAP_US 20U
 #define DSHOT_MAX_SYMBOLS 32U
 #define RMT_MAX_DURATION_TICKS 0x7fffU
+#define DSHOT_COMMAND_RATE_HZ 1000U
+#define DSHOT_COMMAND_INITIAL_DELAY_US 10000U
+#define DSHOT_COMMAND_POST_DELAY_US 1000U
+#define DSHOT_COMMAND_BEEP_POST_DELAY_US 100000U
 
 #define SIGNAL_WATCHDOG_TASK_STACK 3072
 #define SIGNAL_TASK_PRIORITY 9
@@ -180,6 +185,21 @@ static size_t dshot_build_symbols(
     /* Fill the rest of the requested frame period with a hardware-timed low gap. */
     if (!dshot_append_low_ticks(period_ticks - frame_ticks, &count)) return 0;
     return count;
+}
+
+static uint8_t dshot_command_repeats(uint8_t command)
+{
+    switch (command) {
+        case 7: case 8: case 9: case 10: case 12: case 13: case 14: case 20: case 21:
+            return 10;
+        default:
+            return 1;
+    }
+}
+
+static uint32_t dshot_command_post_delay_us(uint8_t command)
+{
+    return command >= 1 && command <= 5 ? DSHOT_COMMAND_BEEP_POST_DELAY_US : DSHOT_COMMAND_POST_DELAY_US;
 }
 
 static void watchdog_task(void *arg)
@@ -400,6 +420,60 @@ esp_err_t signal_generator_start_dshot(
 
     xSemaphoreGive(signal_mutex);
     return ESP_OK;
+}
+
+esp_err_t signal_generator_send_dshot_command(uint16_t speed, uint8_t command)
+{
+    if (speed != 150 && speed != 300 && speed != 600) return ESP_ERR_INVALID_ARG;
+    if (command < 1 || command > 47) return ESP_ERR_INVALID_ARG;
+
+    xSemaphoreTake(signal_mutex, portMAX_DELAY);
+    stop_locked();
+    prepare_generator_gpio_locked();
+
+    gpio_reset_pin(signal_gpio_cfg);
+    gpio_set_direction(signal_gpio_cfg, GPIO_MODE_OUTPUT);
+    gpio_set_level(signal_gpio_cfg, 0);
+    esp_rom_delay_us(DSHOT_COMMAND_INITIAL_DELAY_US);
+
+    dshot_symbol_count = dshot_build_symbols(speed, command, true, DSHOT_COMMAND_RATE_HZ);
+    if (dshot_symbol_count == 0 || dshot_symbol_count > 48) {
+        stop_locked();
+        xSemaphoreGive(signal_mutex);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    rmt_tx_channel_config_t tx_chan_cfg = {
+        .gpio_num = signal_gpio_cfg,
+        .clk_src = RMT_CLK_SRC_DEFAULT,
+        .resolution_hz = DSHOT_RMT_RESOLUTION_HZ,
+        .mem_block_symbols = 48,
+        .trans_queue_depth = 1,
+    };
+    esp_err_t err = rmt_new_tx_channel(&tx_chan_cfg, &rmt_channel);
+    if (err == ESP_OK) {
+        rmt_copy_encoder_config_t encoder_cfg = {};
+        err = rmt_new_copy_encoder(&encoder_cfg, &rmt_encoder);
+    }
+    if (err == ESP_OK) err = rmt_enable(rmt_channel);
+    if (err == ESP_OK) {
+        rmt_transmit_config_t tx_cfg = {
+            .loop_count = dshot_command_repeats(command),
+        };
+        err = rmt_transmit(
+            rmt_channel,
+            rmt_encoder,
+            dshot_symbols,
+            dshot_symbol_count * sizeof(dshot_symbols[0]),
+            &tx_cfg
+        );
+    }
+    if (err == ESP_OK) err = rmt_tx_wait_all_done(rmt_channel, 250);
+    if (err == ESP_OK) esp_rom_delay_us(dshot_command_post_delay_us(command));
+
+    stop_locked();
+    xSemaphoreGive(signal_mutex);
+    return err;
 }
 
 esp_err_t signal_generator_stop(void)

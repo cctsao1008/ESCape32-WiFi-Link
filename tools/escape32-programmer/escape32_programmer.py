@@ -20,7 +20,7 @@ except ImportError:
     serial = None
     list_ports = None
 
-TOOL_VERSION = "1.4.0"
+TOOL_VERSION = "1.7.0"
 
 CMD_PROBE = 0
 CMD_INFO = 1
@@ -58,6 +58,7 @@ ADAPTER_CMD_SIGNAL_KEEPALIVE = 11
 ADAPTER_CMD_GPIO_GET = 12
 ADAPTER_CMD_GPIO_SET = 13
 ADAPTER_CMD_GPIO_RELEASE = 14
+ADAPTER_CMD_SIGNAL_DSHOT_COMMAND = 15
 
 ADAPTER_STATUS = {
     0: "OK",
@@ -71,7 +72,39 @@ ADAPTER_INFO_STRUCT = struct.Struct("<BBBBBBBBIBB")
 SIGNAL_INFO_STRUCT = struct.Struct("<BBBBHHHHHH")
 SIGNAL_PWM_STRUCT = struct.Struct("<HHH")
 SIGNAL_DSHOT_STRUCT = struct.Struct("<HHHHB")
+SIGNAL_DSHOT_COMMAND_STRUCT = struct.Struct("<HB")
 GPIO_INFO_STRUCT = struct.Struct("<BBBB")
+
+DSHOT_SPECIAL_COMMANDS = {
+    "beacon1": 1,
+    "beacon2": 2,
+    "beacon3": 3,
+    "beacon4": 4,
+    "beacon5": 5,
+    "esc-info": 6,
+    "spin-direction-1": 7,
+    "spin-direction-2": 8,
+    "3d-mode-off": 9,
+    "3d-mode-on": 10,
+    "settings-request": 11,
+    "save-settings": 12,
+    "extended-telemetry-enable": 13,
+    "extended-telemetry-disable": 14,
+    "spin-direction-normal": 20,
+    "spin-direction-reversed": 21,
+    "led0-on": 22,
+    "led1-on": 23,
+    "led2-on": 24,
+    "led3-on": 25,
+    "led0-off": 26,
+    "led1-off": 27,
+    "led2-off": 28,
+    "led3-off": 29,
+    "audio-stream-mode-on-off": 30,
+    "silent-mode-on-off": 31,
+}
+DSHOT_SPECIAL_NAMES = {value: name for name, value in DSHOT_SPECIAL_COMMANDS.items()}
+DSHOT_SPECIAL_REPEAT_10 = frozenset((7, 8, 9, 10, 12, 13, 14, 20, 21))
 
 
 class ProgrammerError(RuntimeError):
@@ -567,6 +600,12 @@ class Escape32Adapter:
         payload = SIGNAL_DSHOT_STRUCT.pack(speed, value, rate_hz, watchdog_ms, 1 if telemetry else 0)
         return self.parse_signal(self.request_raw(ADAPTER_CMD_SIGNAL_DSHOT, payload))
 
+    def signal_dshot_command(self, speed: int, command: int) -> SignalInfo:
+        payload = SIGNAL_DSHOT_COMMAND_STRUCT.pack(speed, command)
+        return self.parse_signal(
+            self.request_raw(ADAPTER_CMD_SIGNAL_DSHOT_COMMAND, payload, timeout=2.0)
+        )
+
     def signal_keepalive(self) -> SignalInfo:
         return self.parse_signal(self.request_raw(ADAPTER_CMD_SIGNAL_KEEPALIVE))
 
@@ -658,6 +697,42 @@ def validate_expectations(args, info: BootInfo, fw: Optional[FirmwareInfo]) -> N
         raise ProgrammerError("Target validation failed: " + "; ".join(issues))
 
 
+def dshot_value_from_throttle(throttle: float) -> int:
+    if not 0.0 <= throttle <= 100.0:
+        raise ProgrammerError("--throttle must be 0..100")
+    if throttle == 0.0:
+        return 0
+    return 48 + int(round((throttle / 100.0) * (2047 - 48)))
+
+
+def parse_dshot_special_command(value: str) -> int:
+    key = value.strip().lower().replace("_", "-")
+    if key in DSHOT_SPECIAL_COMMANDS:
+        return DSHOT_SPECIAL_COMMANDS[key]
+    try:
+        command = int(value, 0)
+    except ValueError as exc:
+        names = ", ".join(DSHOT_SPECIAL_COMMANDS)
+        raise argparse.ArgumentTypeError(
+            f"invalid DShot special command '{value}'. Use 1..47 or one of: {names}"
+        ) from exc
+    if not 1 <= command <= 47:
+        raise argparse.ArgumentTypeError("DShot special command must be 1..47")
+    return command
+
+
+def dshot_special_command_name(command: int) -> str:
+    return DSHOT_SPECIAL_NAMES.get(command, f"reserved-{command}")
+
+
+def dshot_special_command_repeats(command: int) -> int:
+    return 10 if command in DSHOT_SPECIAL_REPEAT_10 else 1
+
+
+def dshot_special_command_post_delay_ms(command: int) -> int:
+    return 100 if 1 <= command <= 5 else 1
+
+
 def self_test() -> int:
     assert crc32_escape32(b"123456789") == 0xCBF43926
     for value in (0, 1, 2, 3, 4, 0x55, 0xFF):
@@ -672,6 +747,16 @@ def self_test() -> int:
     assert sig.mode == 2 and sig.dshot_speed == 600 and sig.dshot_value == 48
     g = Escape32Adapter.parse_gpio(GPIO_INFO_STRUCT.pack(0, 8, 1, 1))
     assert g.gpio == 8 and g.level == 1 and g.override_active
+    assert dshot_value_from_throttle(0.0) == 0
+    assert dshot_value_from_throttle(50.0) == 1048
+    assert dshot_value_from_throttle(100.0) == 2047
+    assert parse_dshot_special_command("beacon1") == 1
+    assert parse_dshot_special_command("spin-direction-normal") == 20
+    assert parse_dshot_special_command("0x2F") == 47
+    assert dshot_special_command_repeats(7) == 10
+    assert dshot_special_command_repeats(1) == 1
+    assert dshot_special_command_post_delay_ms(1) == 100
+    assert dshot_special_command_post_delay_ms(20) == 1
     print("Self-test: PASS")
     return 0
 
@@ -702,6 +787,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     add_connection_args(parser)
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("info")
+
+    cli_p = sub.add_parser("cli", help="ESC CLI over the ESCape32 Link USB bridge")
+    cli_p.add_argument(
+        "-c", "--command", dest="cli_line",
+        help="Run one ESC CLI command and exit; omit for interactive mode",
+    )
+    cli_p.add_argument(
+        "--first-byte-timeout", type=float, default=1.0,
+        help="Seconds to wait for the first response byte (default: 1.0)",
+    )
+    cli_p.add_argument(
+        "--idle-timeout", type=float, default=0.15,
+        help="End a response after this idle time in seconds (default: 0.15)",
+    )
 
     inspect_p = sub.add_parser("inspect-image")
     inspect_p.add_argument("image")
@@ -761,11 +860,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     dshot_p = signal_sub.add_parser("dshot")
     dshot_p.add_argument("--speed", type=int, required=True, choices=(150, 300, 600))
-    dshot_p.add_argument("--value", type=int, required=True)
-    dshot_p.add_argument("--rate-hz", type=int, default=1000)
-    dshot_p.add_argument("--telemetry", action="store_true")
-    dshot_p.add_argument("--watchdog-ms", type=int, default=1500)
-    dshot_p.add_argument("--duration", type=float, help="Seconds; omit to run until Ctrl+C")
+    dshot_value = dshot_p.add_mutually_exclusive_group(required=True)
+    dshot_value.add_argument("--value", type=int, help="Raw DShot value 0..2047 for continuous output")
+    dshot_value.add_argument("--throttle", type=float, help="Throttle 0..100; 0%% maps to stop, >0%% maps to DShot 48..2047")
+    dshot_value.add_argument("--command", dest="dshot_command", type=parse_dshot_special_command, metavar="NAME|1..47", help="Finite DShot special command sequence; telemetry-request bit is forced ON")
+    dshot_p.add_argument("--rate-hz", type=int, default=1000, help="Continuous DShot frame rate 50..4000 Hz; special commands use 1 kHz cadence")
+    dshot_p.add_argument("--telemetry", action="store_true", help="Set telemetry-request bit for continuous DShot; special commands force it ON")
+    dshot_p.add_argument("--watchdog-ms", type=int, default=1500, help="Continuous DShot watchdog 250..10000 ms")
+    dshot_p.add_argument("--duration", type=float, help="Continuous output seconds; omit to run until Ctrl+C. Not valid with --command")
     return parser
 
 
@@ -773,6 +875,90 @@ def open_transport(args) -> Escape32Serial:
     if not args.port:
         raise ProgrammerError("--port is required for this command")
     return Escape32Serial(args.port, pacing=not args.no_pacing, verbose=args.verbose)
+
+
+def recv_cli_response(transport: Escape32Serial, first_byte_timeout: float, idle_timeout: float) -> bytes:
+    if first_byte_timeout <= 0:
+        raise ProgrammerError("--first-byte-timeout must be greater than zero")
+    if idle_timeout <= 0:
+        raise ProgrammerError("--idle-timeout must be greater than zero")
+
+    out = bytearray()
+    first_deadline = time.monotonic() + first_byte_timeout
+    last_rx = None
+
+    while True:
+        now = time.monotonic()
+        if last_rx is None:
+            remaining = first_deadline - now
+            if remaining <= 0:
+                break
+        else:
+            remaining = idle_timeout - (now - last_rx)
+            if remaining <= 0:
+                break
+
+        transport.ser.timeout = min(0.050, max(remaining, 0.001))
+        try:
+            chunk = transport.ser.read(256)
+        except serial.SerialException as exc:
+            raise ProgrammerError(f"Serial read failed: {exc}") from exc
+
+        if not chunk:
+            continue
+
+        if transport.verbose:
+            transport._trace_rx(chunk)
+        out.extend(chunk)
+        last_rx = time.monotonic()
+
+        if out.endswith(b"OK\n") or out.endswith(b"ERROR\n"):
+            break
+
+    return bytes(out)
+
+
+def run_cli_command(args) -> int:
+    with open_transport(args) as transport:
+        print(f"Port.................... {args.port}")
+        print("ESC CLI................. USB -> ESC UART 38400")
+
+        def execute(line: str) -> bytes:
+            data = line.encode("utf-8")
+            if not data.endswith(b"\n"):
+                data += b"\n"
+
+            transport.flush_input()
+            transport.send_buf(data)
+            response = recv_cli_response(
+                transport,
+                args.first_byte_timeout,
+                args.idle_timeout,
+            )
+
+            if response:
+                sys.stdout.buffer.write(response)
+                sys.stdout.buffer.flush()
+            return response
+
+        if args.cli_line is not None:
+            execute(args.cli_line)
+            print("\nRESULT: PASS")
+            return 0
+
+        print("Interactive mode. Press Ctrl+Z then Enter on Windows, or Ctrl+D on POSIX, to quit.")
+        try:
+            while True:
+                try:
+                    line = input("> ")
+                except EOFError:
+                    break
+                execute(line)
+        except KeyboardInterrupt:
+            print()
+
+        print("RESULT: PASS")
+        return 0
 
 
 def run_signal_session(adapter: Escape32Adapter, start_info: SignalInfo, watchdog_ms: int, duration: Optional[float]) -> int:
@@ -859,13 +1045,35 @@ def run_adapter_command(args) -> int:
                 info = adapter.signal_pwm(args.freq, pulse_us, args.watchdog_ms)
                 return run_signal_session(adapter, info, args.watchdog_ms, args.duration)
             elif args.signal_action == "dshot":
-                if not 0 <= args.value <= 2047:
+                if args.dshot_command is not None:
+                    if args.duration is not None:
+                        raise ProgrammerError("--duration is not valid with --command")
+                    if args.rate_hz != 1000:
+                        raise ProgrammerError("--rate-hz is fixed at 1000 for DShot special commands")
+                    if args.watchdog_ms != 1500:
+                        raise ProgrammerError("--watchdog-ms is not used with DShot special commands")
+                    command = args.dshot_command
+                    print(f"DShot special command.... {dshot_special_command_name(command)} ({command})")
+                    print(f"DShot command repeats.... {dshot_special_command_repeats(command)}")
+                    print("DShot telemetry bit...... ON (forced)")
+                    print("DShot initial delay...... 10 ms")
+                    print(f"DShot post delay......... {dshot_special_command_post_delay_ms(command)} ms")
+                    info = adapter.signal_dshot_command(args.speed, command)
+                    print_signal_info(info)
+                    print()
+                    print("RESULT: PASS")
+                    return 0
+
+                dshot_value = args.value
+                if args.throttle is not None:
+                    dshot_value = dshot_value_from_throttle(args.throttle)
+                elif not 0 <= dshot_value <= 2047:
                     raise ProgrammerError("--value must be 0..2047")
                 if not 50 <= args.rate_hz <= 4000:
                     raise ProgrammerError("--rate-hz must be 50..4000")
                 if not 250 <= args.watchdog_ms <= 10000:
                     raise ProgrammerError("--watchdog-ms must be 250..10000")
-                info = adapter.signal_dshot(args.speed, args.value, args.rate_hz, args.telemetry, args.watchdog_ms)
+                info = adapter.signal_dshot(args.speed, dshot_value, args.rate_hz, args.telemetry, args.watchdog_ms)
                 return run_signal_session(adapter, info, args.watchdog_ms, args.duration)
         else:
             raise ProgrammerError(f"Unsupported adapter command: {args.adapter_command}")
@@ -949,6 +1157,8 @@ def main() -> int:
         if args.command == "inspect-image":
             print_image_info(load_application_image(args.image))
             return 0
+        if args.command == "cli":
+            return run_cli_command(args)
         if args.command == "adapter":
             return run_adapter_command(args)
         return run_bootloader_command(args)

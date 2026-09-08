@@ -41,6 +41,7 @@ static esp_err_t link_legacy_led_noop(gpio_num_t gpio_num, uint32_t level)
 #define ADAPTER_CMD_GPIO_GET         12
 #define ADAPTER_CMD_GPIO_SET         13
 #define ADAPTER_CMD_GPIO_RELEASE     14
+#define ADAPTER_CMD_SIGNAL_DSHOT_COMMAND 15
 
 #define SIGNAL_STATUS_UART   0
 #define SIGNAL_STATUS_PWM    1
@@ -64,6 +65,11 @@ typedef struct __attribute__((__packed__)) {
     uint16_t watchdog_ms;
     uint8_t telemetry;
 } SignalDshotRequest;
+
+typedef struct __attribute__((__packed__)) {
+    uint16_t speed;
+    uint8_t command;
+} SignalDshotCommandRequest;
 
 typedef struct __attribute__((__packed__)) {
     uint8_t status;
@@ -257,6 +263,21 @@ static uint8_t link_signal_start_dshot(const SignalDshotRequest *req)
     return ADAPTER_STATUS_OK;
 }
 
+static uint8_t link_signal_send_dshot_command(const SignalDshotCommandRequest *req)
+{
+    if (req->command < 1 || req->command > 47) return ADAPTER_STATUS_BAD_ARG;
+    if (!link_owner_acquire(LINK_OWNER_USB)) return ADAPTER_STATUS_BUSY;
+    if (xSemaphoreTake(uart_mutex, pdMS_TO_TICKS(250)) != pdTRUE) {
+        link_owner_release(LINK_OWNER_USB);
+        return ADAPTER_STATUS_BUSY;
+    }
+    esp_err_t err = signal_generator_send_dshot_command(req->speed, req->command);
+    xSemaphoreGive(uart_mutex);
+    link_owner_release(LINK_OWNER_USB);
+    if (err == ESP_OK) return ADAPTER_STATUS_OK;
+    return err == ESP_ERR_INVALID_ARG ? ADAPTER_STATUS_BAD_ARG : ADAPTER_STATUS_INTERNAL;
+}
+
 static uint8_t link_signal_stop(void)
 {
     if (xSemaphoreTake(uart_mutex, pdMS_TO_TICKS(250)) != pdTRUE) {
@@ -425,6 +446,17 @@ static void link_process_signal_frame(
             break;
         }
 
+        case ADAPTER_CMD_SIGNAL_DSHOT_COMMAND: {
+            if (header->length != sizeof(SignalDshotCommandRequest)) {
+                status = ADAPTER_STATUS_BAD_ARG;
+                break;
+            }
+            SignalDshotCommandRequest req;
+            memcpy(&req, payload, sizeof req);
+            status = link_signal_send_dshot_command(&req);
+            break;
+        }
+
         case ADAPTER_CMD_SIGNAL_STOP:
             if (header->length != 0) status = ADAPTER_STATUS_BAD_ARG;
             else status = link_signal_stop();
@@ -445,8 +477,10 @@ static void link_process_signal_frame(
 
 static bool link_is_signal_command(uint8_t command)
 {
-    return command >= ADAPTER_CMD_SIGNAL_GET &&
-        command <= ADAPTER_CMD_SIGNAL_KEEPALIVE;
+    return (
+        command >= ADAPTER_CMD_SIGNAL_GET &&
+        command <= ADAPTER_CMD_SIGNAL_KEEPALIVE
+    ) || command == ADAPTER_CMD_SIGNAL_DSHOT_COMMAND;
 }
 
 static void link_forward_raw(const uint8_t *buf, int len)
