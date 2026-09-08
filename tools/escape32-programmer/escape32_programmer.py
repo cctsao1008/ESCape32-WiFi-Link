@@ -20,7 +20,7 @@ except ImportError:
     serial = None
     list_ports = None
 
-TOOL_VERSION = "1.7.1"
+TOOL_VERSION = "1.7.2"
 
 CMD_PROBE = 0
 CMD_INFO = 1
@@ -40,6 +40,10 @@ MAX_APP_IMAGE_SIZE = 128 * 1024
 MAX_BOOT_IMAGE_SIZE = 4 * 1024
 BLOCK_SIZE = 1024
 WRP_LEVELS = {0: 0x33, 1: 0x44, 2: 0x55}
+
+ADAPTER_RECOVERY_TIMEOUT_S = 4.0
+ADAPTER_RECOVERY_RESET_HOLD_S = 0.050
+ADAPTER_RECOVERY_BOOT_DELAY_S = 0.250
 
 ADAPTER_REQUEST_MAGIC = b"\xA5\x5AESC32!"
 ADAPTER_RESPONSE_MAGIC = b"\x5A\xA5ESC32!"
@@ -361,8 +365,51 @@ class Escape32Serial:
             except (serial.SerialException, OSError):
                 pass
             finally:
-                self.ser.close()
+                try:
+                    self.ser.close()
+                except (serial.SerialException, OSError):
+                    pass
                 self.ser = None
+
+    def recover_adapter_application(self, timeout: float = ADAPTER_RECOVERY_TIMEOUT_S) -> None:
+        """Clear the C3 download flag, issue a native-USB reset, then reconnect."""
+        if self.ser is None or not self.ser.is_open:
+            raise ProgrammerError("Adapter recovery requires an open serial port")
+
+        # Native USB Serial/JTAG uses CDC control lines as an internal boot/reset
+        # state machine.  First force RTS=0,DTR=0 to clear a stale download flag,
+        # then pulse RTS high while DTR remains low to reset the SoC.  If the USB
+        # device disappears immediately, that is expected during the reset.
+        try:
+            self._set_safe_control_lines()
+            time.sleep(ADAPTER_RECOVERY_RESET_HOLD_S)
+            self.ser.rts = True
+            time.sleep(ADAPTER_RECOVERY_RESET_HOLD_S)
+            self.ser.rts = False
+            self.ser.dtr = False
+        except (serial.SerialException, OSError):
+            pass
+
+        try:
+            if self.ser is not None and self.ser.is_open:
+                self.ser.close()
+        except (serial.SerialException, OSError):
+            pass
+        self.ser = None
+
+        deadline = time.monotonic() + timeout
+        last_error = None
+        while time.monotonic() < deadline:
+            try:
+                self.__enter__()
+                time.sleep(ADAPTER_RECOVERY_BOOT_DELAY_S)
+                return
+            except ProgrammerError as exc:
+                last_error = str(exc)
+                time.sleep(0.100)
+
+        detail = f": {last_error}" if last_error else ""
+        raise ProgrammerError(f"Adapter did not re-enumerate on {self.port} after reset{detail}")
 
     def _trace_tx(self, data: bytes) -> None:
         if self.verbose:
@@ -908,6 +955,24 @@ def open_transport(args) -> Escape32Serial:
     return Escape32Serial(args.port, pacing=not args.no_pacing, verbose=args.verbose)
 
 
+def ensure_link_adapter(transport: Escape32Serial) -> tuple[Escape32Adapter, AdapterInfo, bool]:
+    """Probe the Link application and recover once if the C3 is stuck in ROM boot."""
+    adapter = Escape32Adapter(transport)
+    try:
+        return adapter, adapter.info(), False
+    except ProgrammerError as exc:
+        if "Adapter response timeout" not in str(exc):
+            raise
+
+    print("Adapter probe........... timeout")
+    print("Adapter recovery........ ", end="", flush=True)
+    transport.recover_adapter_application()
+    adapter = Escape32Adapter(transport)
+    info = adapter.info()
+    print("OK")
+    return adapter, info, True
+
+
 def recv_cli_response(transport: Escape32Serial, first_byte_timeout: float, idle_timeout: float) -> bytes:
     if first_byte_timeout <= 0:
         raise ProgrammerError("--first-byte-timeout must be greater than zero")
@@ -952,6 +1017,7 @@ def recv_cli_response(transport: Escape32Serial, first_byte_timeout: float, idle
 def run_cli_command(args) -> int:
     with open_transport(args) as transport:
         print(f"Port.................... {args.port}")
+        ensure_link_adapter(transport)
         print("ESC CLI................. USB -> ESC UART 38400")
 
         def execute(line: str) -> bytes:
@@ -1023,11 +1089,11 @@ def run_signal_session(adapter: Escape32Adapter, start_info: SignalInfo, watchdo
 
 def run_adapter_command(args) -> int:
     with open_transport(args) as transport:
-        adapter = Escape32Adapter(transport)
         print(f"Port.................... {args.port}")
+        adapter, initial_info, _ = ensure_link_adapter(transport)
 
         if args.adapter_command == "info":
-            print_adapter_info(adapter.info())
+            print_adapter_info(initial_info)
         elif args.adapter_command == "wifi":
             if args.wifi_action == "status":
                 info = adapter.wifi_status()
