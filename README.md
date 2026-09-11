@@ -51,7 +51,7 @@ UART mode keeps the original GPIO2/GPIO4 single-wire topology. PWM/DShot reuses 
 Building
 --------
 
-ESP-IDF v5.5 is the current baseline:
+Build baseline: ESP-IDF v5.5.
 
 ```text
 idf.py set-target esp32c3
@@ -94,7 +94,16 @@ py .\escape32_programmer.py --port COM7 adapter signal stop
 
 Signal-generator commands run in the foreground by default and automatically send watchdog keepalives. Press `Ctrl+C` to stop and return to UART mode.
 
+Documentation Principle
+-----------------------
+
+> **README explains the system. Issues explain the journey. Code proves the current state.**
+
+This README describes the durable adapter architecture, supported interface semantics, build contract, and operator-facing usage. GitHub Issues preserve bring-up work, experiments, temporary constraints, and implementation decisions. Firmware, host tools, configuration, and tests remain the authoritative evidence of executable behavior.
+
 Upstream
 --------
 
 The original project is maintained at [neoxic/ESCape32-WiFi-Link](https://github.com/neoxic/ESCape32-WiFi-Link).
+
+This fork preserves upstream provenance while documenting only the fork-specific system behavior and interfaces owned here.
