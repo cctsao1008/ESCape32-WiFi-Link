@@ -25,7 +25,9 @@ static esp_err_t link_legacy_led_noop(gpio_num_t gpio_num, uint32_t level)
 #define app_main legacy_app_main
 #define usb_to_uart_task legacy_usb_to_uart_task
 #define uart_to_usb_task legacy_uart_to_usb_task
+#define start_wifi_services legacy_start_wifi_services
 #include "main.c"
+#undef start_wifi_services
 #undef uart_to_usb_task
 #undef usb_to_uart_task
 #undef app_main
@@ -42,6 +44,7 @@ static esp_err_t link_legacy_led_noop(gpio_num_t gpio_num, uint32_t level)
 #define ADAPTER_CMD_GPIO_SET         13
 #define ADAPTER_CMD_GPIO_RELEASE     14
 #define ADAPTER_CMD_SIGNAL_DSHOT_COMMAND 15
+#define ADAPTER_CMD_WIFI_DIAG        16
 
 #define SIGNAL_STATUS_UART   0
 #define SIGNAL_STATUS_PWM    1
@@ -51,6 +54,8 @@ static esp_err_t link_legacy_led_noop(gpio_num_t gpio_num, uint32_t level)
 #define LINK_LED_TASK_STACK    2048
 #define LINK_LED_TASK_PRIORITY 5
 #define LINK_LED_ACTIVITY_TICKS 2
+#define LINK_IDLE_DELAY_MS 5
+#define LINK_IDLE_DELAY_TICKS ((pdMS_TO_TICKS(LINK_IDLE_DELAY_MS) > 0) ? pdMS_TO_TICKS(LINK_IDLE_DELAY_MS) : 1)
 
 typedef struct __attribute__((__packed__)) {
     uint16_t freq_hz;
@@ -91,6 +96,44 @@ typedef struct __attribute__((__packed__)) {
     uint8_t override_active;
 } GpioInfoPayload;
 
+typedef enum {
+    LINK_WIFI_STATE_DISABLED = 0,
+    LINK_WIFI_STATE_STARTING = 1,
+    LINK_WIFI_STATE_READY = 2,
+    LINK_WIFI_STATE_ERROR = 3,
+} LinkWifiState;
+
+typedef enum {
+    LINK_WIFI_STAGE_NONE = 0,
+    LINK_WIFI_STAGE_NETIF_INIT = 1,
+    LINK_WIFI_STAGE_EVENT_LOOP = 2,
+    LINK_WIFI_STAGE_AP_NETIF = 3,
+    LINK_WIFI_STAGE_WIFI_INIT = 4,
+    LINK_WIFI_STAGE_SET_MODE = 5,
+    LINK_WIFI_STAGE_SET_CONFIG = 6,
+    LINK_WIFI_STAGE_WIFI_START = 7,
+    LINK_WIFI_STAGE_MDNS_INIT = 8,
+    LINK_WIFI_STAGE_MDNS_HOSTNAME = 9,
+    LINK_WIFI_STAGE_HTTP_START = 10,
+    LINK_WIFI_STAGE_HTTP_404 = 11,
+    LINK_WIFI_STAGE_HTTP_ROOT = 12,
+    LINK_WIFI_STAGE_HTTP_WS = 13,
+    LINK_WIFI_STAGE_HTTP_EVENT_CONNECTED = 14,
+    LINK_WIFI_STAGE_HTTP_EVENT_DISCONNECTED = 15,
+    LINK_WIFI_STAGE_DNS_TASK = 16,
+    LINK_WIFI_STAGE_READY = 17,
+} LinkWifiStage;
+
+typedef struct __attribute__((__packed__)) {
+    uint8_t status;
+    uint8_t state;
+    uint8_t stage;
+    uint8_t reset_reason;
+    int32_t error;
+    uint32_t free_heap;
+    uint32_t min_free_heap;
+} WifiDiagPayload;
+
 typedef struct {
     uint8_t buf[8 + sizeof(AdapterHeader) + ADAPTER_MAX_PAYLOAD + 4];
     size_t len;
@@ -100,6 +143,9 @@ typedef struct {
 static volatile uint8_t link_led_activity_ticks;
 static volatile bool link_gpio_override_active;
 static volatile uint8_t link_gpio_override_pin;
+static volatile uint8_t link_wifi_state = LINK_WIFI_STATE_DISABLED;
+static volatile uint8_t link_wifi_stage = LINK_WIFI_STAGE_NONE;
+static volatile int32_t link_wifi_error = ESP_OK;
 
 static void link_led_write(bool on)
 {
@@ -157,6 +203,202 @@ static void link_led_task(void *arg)
         ++phase;
         vTaskDelay(pdMS_TO_TICKS(LINK_LED_TICK_MS));
     }
+}
+
+static esp_err_t link_wifi_fail(LinkWifiStage stage, esp_err_t err)
+{
+    link_wifi_stage = (uint8_t)stage;
+    link_wifi_error = (int32_t)err;
+    link_wifi_state = LINK_WIFI_STATE_ERROR;
+    wifi_active = false;
+    return err;
+}
+
+static esp_err_t link_http_register_uri(
+    const char *path,
+    esp_err_t (*handler)(httpd_req_t *)
+)
+{
+    const httpd_uri_t uri = {
+        .uri = path,
+        .method = HTTP_GET,
+        .handler = handler,
+        .is_websocket = handler == wshandler,
+    };
+    return httpd_register_uri_handler(server, &uri);
+}
+
+static esp_err_t start_wifi_services(void)
+{
+    esp_err_t err;
+    BaseType_t task_res;
+
+    wifi_active = false;
+    link_wifi_state = LINK_WIFI_STATE_STARTING;
+    link_wifi_stage = LINK_WIFI_STAGE_NONE;
+    link_wifi_error = ESP_OK;
+
+    link_wifi_stage = LINK_WIFI_STAGE_NETIF_INIT;
+    err = esp_netif_init();
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        return link_wifi_fail(LINK_WIFI_STAGE_NETIF_INIT, err);
+    }
+
+    link_wifi_stage = LINK_WIFI_STAGE_EVENT_LOOP;
+    err = esp_event_loop_create_default();
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        return link_wifi_fail(LINK_WIFI_STAGE_EVENT_LOOP, err);
+    }
+
+    link_wifi_stage = LINK_WIFI_STAGE_AP_NETIF;
+    if (!esp_netif_create_default_wifi_ap()) {
+        return link_wifi_fail(LINK_WIFI_STAGE_AP_NETIF, ESP_ERR_NO_MEM);
+    }
+
+    wifi_init_config_t wicfg = WIFI_INIT_CONFIG_DEFAULT();
+    link_wifi_stage = LINK_WIFI_STAGE_WIFI_INIT;
+    err = esp_wifi_init(&wicfg);
+    if (err != ESP_OK) return link_wifi_fail(LINK_WIFI_STAGE_WIFI_INIT, err);
+
+    wifi_config_t wcfg = {
+        .ap = {
+            .ssid = SSID,
+            .ssid_len = sizeof SSID - 1,
+            .max_connection = 1,
+            .authmode = WIFI_AUTH_OPEN,
+        },
+    };
+
+    link_wifi_stage = LINK_WIFI_STAGE_SET_MODE;
+    err = esp_wifi_set_mode(WIFI_MODE_AP);
+    if (err != ESP_OK) return link_wifi_fail(LINK_WIFI_STAGE_SET_MODE, err);
+
+    link_wifi_stage = LINK_WIFI_STAGE_SET_CONFIG;
+    err = esp_wifi_set_config(WIFI_IF_AP, &wcfg);
+    if (err != ESP_OK) return link_wifi_fail(LINK_WIFI_STAGE_SET_CONFIG, err);
+
+    link_wifi_stage = LINK_WIFI_STAGE_WIFI_START;
+    err = esp_wifi_start();
+    if (err != ESP_OK) return link_wifi_fail(LINK_WIFI_STAGE_WIFI_START, err);
+
+    link_wifi_stage = LINK_WIFI_STAGE_MDNS_INIT;
+    err = mdns_init();
+    if (err != ESP_OK) return link_wifi_fail(LINK_WIFI_STAGE_MDNS_INIT, err);
+
+    link_wifi_stage = LINK_WIFI_STAGE_MDNS_HOSTNAME;
+    err = mdns_hostname_set(HOSTNAME);
+    if (err != ESP_OK) return link_wifi_fail(LINK_WIFI_STAGE_MDNS_HOSTNAME, err);
+
+    httpd_config_t hcfg = HTTPD_DEFAULT_CONFIG();
+    hcfg.max_open_sockets = CONFIG_LWIP_MAX_SOCKETS - 3;
+    hcfg.lru_purge_enable = true;
+
+    link_wifi_stage = LINK_WIFI_STAGE_HTTP_START;
+    err = httpd_start(&server, &hcfg);
+    if (err != ESP_OK) return link_wifi_fail(LINK_WIFI_STAGE_HTTP_START, err);
+
+    link_wifi_stage = LINK_WIFI_STAGE_HTTP_404;
+    err = httpd_register_err_handler(server, HTTPD_404_NOT_FOUND, http404handler);
+    if (err != ESP_OK) return link_wifi_fail(LINK_WIFI_STAGE_HTTP_404, err);
+
+    link_wifi_stage = LINK_WIFI_STAGE_HTTP_ROOT;
+    err = link_http_register_uri("/", roothandler);
+    if (err != ESP_OK) return link_wifi_fail(LINK_WIFI_STAGE_HTTP_ROOT, err);
+
+    link_wifi_stage = LINK_WIFI_STAGE_HTTP_WS;
+    err = link_http_register_uri("/ws", wshandler);
+    if (err != ESP_OK) return link_wifi_fail(LINK_WIFI_STAGE_HTTP_WS, err);
+
+    link_wifi_stage = LINK_WIFI_STAGE_HTTP_EVENT_CONNECTED;
+    err = esp_event_handler_register(
+        ESP_HTTP_SERVER_EVENT,
+        HTTP_SERVER_EVENT_ON_CONNECTED,
+        &connhandler,
+        0
+    );
+    if (err != ESP_OK) {
+        return link_wifi_fail(LINK_WIFI_STAGE_HTTP_EVENT_CONNECTED, err);
+    }
+
+    link_wifi_stage = LINK_WIFI_STAGE_HTTP_EVENT_DISCONNECTED;
+    err = esp_event_handler_register(
+        ESP_HTTP_SERVER_EVENT,
+        HTTP_SERVER_EVENT_DISCONNECTED,
+        &disconnhandler,
+        0
+    );
+    if (err != ESP_OK) {
+        return link_wifi_fail(LINK_WIFI_STAGE_HTTP_EVENT_DISCONNECTED, err);
+    }
+
+    link_wifi_stage = LINK_WIFI_STAGE_DNS_TASK;
+    task_res = xTaskCreate(dns_task, "dns", 4096, NULL, 5, NULL);
+    if (task_res != pdPASS) {
+        return link_wifi_fail(LINK_WIFI_STAGE_DNS_TASK, ESP_ERR_NO_MEM);
+    }
+
+    link_wifi_stage = LINK_WIFI_STAGE_READY;
+    link_wifi_state = LINK_WIFI_STATE_READY;
+    link_wifi_error = ESP_OK;
+    wifi_active = true;
+    return ESP_OK;
+}
+
+static void link_fill_wifi_diag(WifiDiagPayload *payload, uint8_t status)
+{
+    memset(payload, 0, sizeof *payload);
+    payload->status = status;
+    payload->state = link_wifi_state;
+    payload->stage = link_wifi_stage;
+    payload->reset_reason = (uint8_t)esp_reset_reason();
+    payload->error = link_wifi_error;
+    payload->free_heap = (uint32_t)esp_get_free_heap_size();
+    payload->min_free_heap = (uint32_t)esp_get_minimum_free_heap_size();
+}
+
+static void link_send_wifi_diag_response(
+    uint8_t command,
+    uint32_t sequence,
+    uint8_t status
+)
+{
+    uint8_t frame[8 + sizeof(AdapterHeader) + sizeof(WifiDiagPayload) + 4];
+    AdapterHeader header = {
+        .version = ADAPTER_PROTOCOL_VERSION,
+        .command = command | 0x80,
+        .length = sizeof(WifiDiagPayload),
+        .sequence = sequence,
+    };
+    WifiDiagPayload payload;
+    link_fill_wifi_diag(&payload, status);
+
+    int pos = 0;
+    memcpy(frame + pos, adapter_response_magic, sizeof adapter_response_magic);
+    pos += sizeof adapter_response_magic;
+    memcpy(frame + pos, &header, sizeof header);
+    pos += sizeof header;
+    memcpy(frame + pos, &payload, sizeof payload);
+    pos += sizeof payload;
+
+    uint32_t crc = esp_crc32_le(
+        0,
+        frame + sizeof adapter_response_magic,
+        sizeof header + sizeof payload
+    );
+    memcpy(frame + pos, &crc, sizeof crc);
+    pos += sizeof crc;
+    usb_write_all(frame, pos);
+}
+
+static void link_process_wifi_diag_frame(
+    const AdapterHeader *header,
+    const uint8_t *payload
+)
+{
+    (void)payload;
+    uint8_t status = header->length == 0 ?
+        ADAPTER_STATUS_OK : ADAPTER_STATUS_BAD_ARG;
+    link_send_wifi_diag_response(header->command, header->sequence, status);
 }
 
 static void link_fill_signal_info(SignalInfoPayload *payload, uint8_t status)
@@ -579,7 +821,9 @@ static void link_adapter_parser_feed(
     );
 
     if (crc_wire == crc_calc) {
-        if (link_is_signal_command(header.command)) {
+        if (header.command == ADAPTER_CMD_WIFI_DIAG) {
+            link_process_wifi_diag_frame(&header, payload);
+        } else if (link_is_signal_command(header.command)) {
             link_process_signal_frame(&header, payload);
         } else if (link_is_gpio_command(header.command)) {
             link_process_gpio_frame(&header, payload);
@@ -623,11 +867,11 @@ static void link_uart_to_usb_task(void *arg)
 
     for (;;) {
         if (!signal_generator_uart_mode()) {
-            vTaskDelay(pdMS_TO_TICKS(5));
+            vTaskDelay(LINK_IDLE_DELAY_TICKS);
             continue;
         }
         if (link_owner_get() != LINK_OWNER_USB) {
-            vTaskDelay(pdMS_TO_TICKS(5));
+            vTaskDelay(LINK_IDLE_DELAY_TICKS);
             continue;
         }
         if (xSemaphoreTake(uart_mutex, pdMS_TO_TICKS(20)) != pdTRUE) continue;
@@ -668,6 +912,11 @@ void app_main(void)
     );
 
     ESP_ERROR_CHECK(link_config_init());
+    if (!wifi_configured) {
+        link_wifi_state = LINK_WIFI_STATE_DISABLED;
+        link_wifi_stage = LINK_WIFI_STAGE_NONE;
+        link_wifi_error = ESP_OK;
+    }
 
     uart_config_t uart_cfg = {
         .baud_rate = 38400,
@@ -737,7 +986,7 @@ void app_main(void)
     );
     ESP_ERROR_CHECK(res == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
 
-    if (wifi_configured) start_wifi_services();
+    if (wifi_configured) (void)start_wifi_services();
 
     /* Boot indication ends here; the status task owns the LED from now on. */
     link_led_write(false);
