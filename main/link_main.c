@@ -54,6 +54,8 @@ static esp_err_t link_legacy_led_noop(gpio_num_t gpio_num, uint32_t level)
 #define LINK_LED_TASK_STACK    2048
 #define LINK_LED_TASK_PRIORITY 5
 #define LINK_LED_ACTIVITY_TICKS 2
+#define LINK_IDLE_DELAY_MS 5
+#define LINK_IDLE_DELAY_TICKS ((pdMS_TO_TICKS(LINK_IDLE_DELAY_MS) > 0) ? pdMS_TO_TICKS(LINK_IDLE_DELAY_MS) : 1)
 
 typedef struct __attribute__((__packed__)) {
     uint16_t freq_hz;
@@ -865,11 +867,11 @@ static void link_uart_to_usb_task(void *arg)
 
     for (;;) {
         if (!signal_generator_uart_mode()) {
-            vTaskDelay(pdMS_TO_TICKS(5));
+            vTaskDelay(LINK_IDLE_DELAY_TICKS);
             continue;
         }
         if (link_owner_get() != LINK_OWNER_USB) {
-            vTaskDelay(pdMS_TO_TICKS(5));
+            vTaskDelay(LINK_IDLE_DELAY_TICKS);
             continue;
         }
         if (xSemaphoreTake(uart_mutex, pdMS_TO_TICKS(20)) != pdTRUE) continue;
